@@ -1,0 +1,32 @@
+[workspace]
+name = "bioshock-head-tracking"
+version = "0.1.0"
+description = "Head tracking mod for BioShock Remastered using OpenTrack"
+channels = ["conda-forge"]
+platforms = ["win-64"]
+
+[tasks]
+# Game is 32-bit, so always target i686-pc-windows-msvc.
+# Use rustup cargo/rustc explicitly to avoid chocolatey rust conflict.
+sync = "git submodule update --remote cameraunlock-core"
+build = "RUSTC=~/.cargo/bin/rustc ~/.cargo/bin/cargo build --target i686-pc-windows-msvc"
+build-release = "RUSTC=~/.cargo/bin/rustc ~/.cargo/bin/cargo build --release --target i686-pc-windows-msvc"
+clean = "cargo clean"
+# Tests + clippy MUST also build for i686 - the engine hook uses
+# `extern "thiscall"`, which is only supported on x86 targets and
+# fails to compile on 64-bit hosts.
+test = "cargo test --target i686-pc-windows-msvc"
+lint = "cargo clippy --target i686-pc-windows-msvc -- -D warnings"
+fmt = "cargo fmt --check"
+fmt-fix = "cargo fmt"
+bench = "cargo bench"
+bench-quick = "cargo bench -- --quick"
+install = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Configuration Debug", depends-on = ["build"] }
+install-release = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Configuration Release", depends-on = ["build-release"] }
+validate-release = "powershell -ExecutionPolicy Bypass -File scripts/validate-release.ps1"
+package = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/package.ps1", depends-on = ["build-release"] }
+release = "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
+detect-game = "powershell -ExecutionPolicy Bypass -File scripts/detect-game.ps1"
+uninstall = "powershell -ExecutionPolicy Bypass -File scripts/uninstall.ps1"
+vanilla = "powershell -ExecutionPolicy Bypass -File scripts/vanilla.ps1"
+clean-all = "cargo clean; powershell -Command \"Remove-Item -Recurse -Force *.log -ErrorAction SilentlyContinue\""

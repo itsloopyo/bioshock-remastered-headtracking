@@ -1,0 +1,103 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+      - 'docs/**'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+      - 'docs/**'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+          components: clippy, rustfmt
+
+      - name: Install Pixi
+        shell: pwsh
+        # We use pixi only as a task runner (no conda dependencies in
+        # pixi.toml). prefix-dev/setup-pixi runs `pixi list --locked`
+        # post-install as a smoke test and treats an empty environment
+        # as a failure, so we install the binary directly instead.
+        # Pin a specific version so transient GitHub-releases blips on
+        # the "latest" alias don't break CI - bump as needed.
+        env:
+          PIXI_VERSION: v0.67.0
+        run: |
+          iwr -useb https://pixi.sh/install.ps1 | iex
+          echo "$env:USERPROFILE\.pixi\bin" >> $env:GITHUB_PATH
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: pixi run fmt
+
+      - name: Run linter
+        run: pixi run lint
+
+      - name: Run tests
+        run: pixi run test
+
+      - name: Build Debug
+        run: pixi run build
+
+      - name: Build Release
+        run: pixi run build-release
+
+      - name: Verify build outputs
+        shell: pwsh
+        run: |
+          # Cargo emits to target/<triple>/<profile>/ when --target is
+          # passed, which the pixi build / build-release tasks do.
+          $debugDll = "target/i686-pc-windows-msvc/debug/bioshock_headtrack.dll"
+          $releaseDll = "target/i686-pc-windows-msvc/release/bioshock_headtrack.dll"
+
+          Write-Host "Checking build outputs..." -ForegroundColor Cyan
+
+          if (Test-Path $debugDll) {
+              $size = [math]::Round((Get-Item $debugDll).Length / 1024, 2)
+              Write-Host "Debug DLL: $size KB" -ForegroundColor Green
+          } else {
+              Write-Host "Debug DLL not found!" -ForegroundColor Red
+              exit 1
+          }
+
+          if (Test-Path $releaseDll) {
+              $size = [math]::Round((Get-Item $releaseDll).Length / 1024, 2)
+              Write-Host "Release DLL: $size KB" -ForegroundColor Green
+          } else {
+              Write-Host "Release DLL not found!" -ForegroundColor Red
+              exit 1
+          }
+
+          Write-Host "Build verification complete" -ForegroundColor Green
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bioshock-headtrack-dll
+          path: target/i686-pc-windows-msvc/release/bioshock_headtrack.dll
+          if-no-files-found: error

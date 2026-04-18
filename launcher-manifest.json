@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "mod_info": {
+    "name": "BioshockRemasteredHeadTracking",
+    "version": "0.0.0",
+    "game_id": "bioshock-remastered"
+  },
+  "strategy": "AsiLoader",
+  "delivery_mode": "profile",
+  "stage_dir": "profile",
+  "session": {
+    "copy_in": [
+      { "src": "asi/xinput1_3.dll", "dest_relative_to": "exe_dir" }
+    ],
+    "env": {},
+    "args": []
+  }
+}

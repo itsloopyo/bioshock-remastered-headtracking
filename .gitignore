@@ -1,0 +1,52 @@
+# Rust build output
+target/
+
+# Windows debug symbols
+*.pdb
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+vendor/
+
+# Pixi
+.pixi/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+*.js.map
+*.d.ts.map
+
+# Testing
+coverage/
+CLAUDE.md
+
+# Agent/workflow scratch directories — never commit.
+.claude/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+*.env
+*.env.*
+*.local
+*.secret
+*.secrets
+config.local.*
+.config.local
+*.key
+*.pem
+*.p12
+.aws/credentials
+.ssh/id_*
+
