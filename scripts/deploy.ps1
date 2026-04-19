@@ -181,12 +181,10 @@ function Deploy-Mod {
     Write-Host '4. Exit game and check bioshock_headtrack.log for analysis'
     Write-Host ''
     Write-Host 'Hotkeys:' -ForegroundColor Yellow
-    Write-Host '  Home     - Recenter view'
-    Write-Host '  End      - Toggle tracking ON/OFF'
-    Write-Host '  PageUp   - Toggle 6DOF position tracking'
-    Write-Host '  Insert   - Toggle reticle overlay'
-    Write-Host '  PageDown - Toggle yaw world/local mode'
-    Write-Host '  Chord alternatives: Ctrl+Shift+R/H/P/X/Y'
+    Write-Host '  Home   - Recenter view'
+    Write-Host '  End    - Toggle tracking ON/OFF'
+    Write-Host '  PageUp - Toggle 6DOF position tracking'
+    Write-Host '  Chord alternatives: Ctrl+Shift+T/Y/G'
 }
 
 # Run deployment

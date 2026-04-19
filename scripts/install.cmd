@@ -17,7 +17,7 @@ set "MOD_DLL=xinput1_3.dll"
 set "MOD_INTERNAL_NAME=BioshockRemasteredHeadTracking"
 set "MOD_VERSION=0.1.0"
 set "STATE_FILE=.headtracking-state.json"
-set "MOD_CONTROLS=Controls (nav cluster / chord):&echo   Home     / Ctrl+Shift+R  Recenter&echo   End      / Ctrl+Shift+H  Toggle tracking&echo   PageUp   / Ctrl+Shift+P  Toggle 6DOF position&echo   Insert   / Ctrl+Shift+X  Toggle reticle&echo   PageDown / Ctrl+Shift+Y  Toggle yaw mode"
+set "MOD_CONTROLS=Controls (nav cluster / chord):&echo   Home    / Ctrl+Shift+T  Recenter&echo   End     / Ctrl+Shift+Y  Toggle tracking&echo   PageUp  / Ctrl+Shift+G  Toggle 6DOF position"
 :: --- END CONFIG BLOCK ---
 
 call :main %*
@@ -95,7 +95,7 @@ echo Deploying %MOD_DLL%...
 
 set "SRC_DLL=%SCRIPT_DIR%plugins\%MOD_DLL%"
 if not exist "%SRC_DLL%" (
-    echo ERROR: %MOD_DLL% not found at: %SRC_DLL%
+    echo ERROR: %MOD_DLL% not found at: "!SRC_DLL!"
     echo.
     exit /b 1
 )
