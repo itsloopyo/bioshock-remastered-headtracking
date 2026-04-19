@@ -1,6 +1,6 @@
 [package]
 name = "bioshock-remastered-head-tracking"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["itsloopyo / CameraUnlock"]
 description = "Decoupled look+aim head tracking mod for BioShock Remastered via OpenTrack UDP. Part of the CameraUnlock project."
