@@ -2,86 +2,92 @@
 :: ============================================
 :: BioShock Remastered Head Tracking - Install
 :: ============================================
-:: Based on cameraunlock-core/scripts/templates/install.cmd.
+:: Based on cameraunlock-core/scripts/templates/install-shim.cmd.
+:: Detection delegated to shared/find-game.ps1 (reads games.json).
+:: Shim-only mod: xinput1_3.dll IS the mod DLL. No external framework.
+:: The exe lives at Build\Final\BioshockHD.exe so EXE_DIR ends up being
+:: <game>\Build\Final.
 :: Only the CONFIG BLOCK below is customised for this mod.
 :: ============================================
 
 :: --- CONFIG BLOCK ---
+set "GAME_ID=bioshock-remastered"
 set "MOD_DISPLAY_NAME=BioShock Remastered Head Tracking"
-set "GAME_EXE=BioshockHD.exe"
-set "GAME_DISPLAY_NAME=BioShock Remastered"
-set "STEAM_FOLDER_NAME=BioShock Remastered"
-set "STEAM_SUBFOLDER=Build\Final"
-set "ENV_VAR_NAME=BIOSHOCK_PATH"
-set "MOD_DLL=xinput1_3.dll"
+set "MOD_DLLS=xinput1_3.dll"
 set "MOD_INTERNAL_NAME=BioshockRemasteredHeadTracking"
 set "MOD_VERSION=0.1.0"
 set "STATE_FILE=.headtracking-state.json"
+set "FRAMEWORK_TYPE=None"
 set "MOD_CONTROLS=Controls (nav cluster / chord):&echo   Home    / Ctrl+Shift+T  Recenter&echo   End     / Ctrl+Shift+Y  Toggle tracking&echo   PageUp  / Ctrl+Shift+G  Toggle 6DOF position"
 :: --- END CONFIG BLOCK ---
 
 call :main %*
 set "_EC=%errorlevel%"
-echo.
-pause
+if not defined YES_FLAG ( echo. & pause )
 exit /b %_EC%
 
 :main
 setlocal enabledelayedexpansion
+
+:: -------- Arg parser (canonical, do not modify) --------
+set "YES_FLAG="
+set "_GIVEN_PATH="
+:parse_args
+if "%~1"=="" goto :args_done
+set "_ARG=%~1"
+if /i "!_ARG!"=="/y"    ( set "YES_FLAG=1" & shift & goto :parse_args )
+if /i "!_ARG!"=="-y"    ( set "YES_FLAG=1" & shift & goto :parse_args )
+if /i "!_ARG!"=="--yes" ( set "YES_FLAG=1" & shift & goto :parse_args )
+if "!_ARG:~0,2!"=="--" ( echo ERROR: unknown flag "!_ARG!" & exit /b 2 )
+if "!_ARG:~0,1!"=="/"  ( echo ERROR: unknown flag "!_ARG!" & exit /b 2 )
+if "!_ARG:~0,1!"=="-"  ( echo ERROR: unknown flag "!_ARG!" & exit /b 2 )
+if not defined _GIVEN_PATH (
+    if exist "!_ARG!\" ( set "_GIVEN_PATH=!_ARG!" & shift & goto :parse_args )
+)
+echo ERROR: unrecognised argument "!_ARG!"
+exit /b 2
+:args_done
 
 echo.
 echo === %MOD_DISPLAY_NAME% - Install ===
 echo.
 
 set "SCRIPT_DIR=%~dp0"
-set "GAME_PATH="
 
-:: --- Find game path (resolves to the Build\Final subfolder) ---
-
-:: Command-line argument: accept either game root OR the Build\Final path
-if not "%~1"=="" (
-    if exist "%~1\%STEAM_SUBFOLDER%\%GAME_EXE%" (
-        set "GAME_PATH=%~1\%STEAM_SUBFOLDER%"
-        goto :found_game
-    )
-    if exist "%~1\%GAME_EXE%" (
-        set "GAME_PATH=%~1"
-        goto :found_game
-    )
-    echo ERROR: %GAME_EXE% not found under: %~1
-    echo.
+:: -------- Resolve game path via shared shim --------
+set "_SHIM=%SCRIPT_DIR%shared\find-game.ps1"
+if not exist "%_SHIM%" set "_SHIM=%SCRIPT_DIR%..\cameraunlock-core\scripts\find-game.ps1"
+if not exist "%_SHIM%" (
+    echo ERROR: find-game.ps1 not found in shared\ or ..\cameraunlock-core\scripts\.
+    echo If this is a release ZIP, re-download it from GitHub ^(corrupt installer^).
+    echo If this is the dev tree, make sure the cameraunlock-core submodule is checked out.
     exit /b 1
 )
-
-:: Environment variable
-if defined %ENV_VAR_NAME% (
-    call set "_ENV_PATH=%%%ENV_VAR_NAME%%%"
-    if exist "!_ENV_PATH!\%STEAM_SUBFOLDER%\%GAME_EXE%" (
-        set "GAME_PATH=!_ENV_PATH!\%STEAM_SUBFOLDER%"
-        goto :found_game
-    )
-    if exist "!_ENV_PATH!\%GAME_EXE%" (
-        set "GAME_PATH=!_ENV_PATH!"
-        goto :found_game
-    )
+set "_SHIM_OUT=%TEMP%\cul-find-%RANDOM%-%RANDOM%.cmd"
+set "_GIVEN_ARG="
+if defined _GIVEN_PATH set "_GIVEN_ARG=-GivenPath "!_GIVEN_PATH!""
+powershell -NoProfile -ExecutionPolicy Bypass -File "%_SHIM%" -GameId %GAME_ID% -OutFile "!_SHIM_OUT!" !_GIVEN_ARG!
+set "_PS_EC=!errorlevel!"
+if not "!_PS_EC!"=="0" (
+    echo.
+    echo ERROR: Could not resolve game install path ^(shim exit code !_PS_EC!^).
+    echo Pass a path explicitly: install.cmd "C:\path\to\game"
+    echo.
+    del "!_SHIM_OUT!" 2>nul
+    exit /b 1
 )
+call "!_SHIM_OUT!"
+del "!_SHIM_OUT!" 2>nul
 
-call :find_steam_game
-if defined GAME_PATH goto :found_game
-
-echo ERROR: Could not find %GAME_DISPLAY_NAME% installation.
-echo.
-echo Please either:
-echo   1. Set %ENV_VAR_NAME% to your game folder (the one containing Build\Final\%GAME_EXE%)
-echo   2. Run: install.cmd "C:\path\to\game"
-echo.
-exit /b 1
-
-:found_game
 echo Game found: %GAME_PATH%
+
+:: Derive EXE_DIR (where shim DLLs land) from GAME_PATH + GAME_EXE_RELPATH.
+for %%i in ("%GAME_PATH%\%GAME_EXE_RELPATH%") do set "EXE_DIR=%%~dpi"
+if "!EXE_DIR:~-1!"=="\" set "EXE_DIR=!EXE_DIR:~0,-1!"
+echo Exe dir : %EXE_DIR%
 echo.
 
-:: --- Check if game is running ---
+:: -------- Game-running check --------
 tasklist /fi "imagename eq %GAME_EXE%" 2>nul | findstr /i "%GAME_EXE%" >nul 2>&1
 if not errorlevel 1 (
     echo ERROR: %GAME_DISPLAY_NAME% is currently running.
@@ -90,82 +96,76 @@ if not errorlevel 1 (
     exit /b 1
 )
 
-:: --- Deploy mod DLL ---
-echo Deploying %MOD_DLL%...
+:: -------- Deploy shim DLL(s) --------
+:: For each entry in MOD_DLLS: if an existing file is present at that name
+:: in EXE_DIR (could be a stock system DLL the game uses or a prior version
+:: of our own shim), back it up to <name>.backup on the *first* install.
+:: If a .backup is already present, leave it alone - we must keep the
+:: user's pre-mod state intact across our re-installs.
+echo Deploying shim files...
 
-set "SRC_DLL=%SCRIPT_DIR%plugins\%MOD_DLL%"
-if not exist "%SRC_DLL%" (
-    echo ERROR: %MOD_DLL% not found at: "!SRC_DLL!"
+set "SRC_DIR=%SCRIPT_DIR%plugins"
+set "DEPLOY_FAILED=0"
+
+for %%f in (%MOD_DLLS%) do (
+    if not exist "%SRC_DIR%\%%f" (
+        echo   ERROR: %%f not found in plugins folder
+        set "DEPLOY_FAILED=1"
+    ) else (
+        if exist "%EXE_DIR%\%%f" (
+            if not exist "%EXE_DIR%\%%f.backup" (
+                copy /y "%EXE_DIR%\%%f" "%EXE_DIR%\%%f.backup" >nul
+                echo   Backed up original %%f to %%f.backup
+            )
+        )
+        copy /y "%SRC_DIR%\%%f" "%EXE_DIR%\%%f" >nul
+        echo   Deployed %%f
+    )
+)
+
+if "!DEPLOY_FAILED!"=="1" (
+    echo.
+    echo ========================================
+    echo   Deployment Failed!
+    echo ========================================
     echo.
     exit /b 1
 )
 
-set "DEST_DLL=%GAME_PATH%\%MOD_DLL%"
-set "BACKUP_DLL=%DEST_DLL%.backup"
-
-:: Back up original DLL only on first install
-if exist "%DEST_DLL%" if not exist "%BACKUP_DLL%" (
-    copy /y "%DEST_DLL%" "%BACKUP_DLL%" >nul
-    echo   Backed up original to %MOD_DLL%.backup
-)
-
-copy /y "%SRC_DLL%" "%DEST_DLL%" >nul
-if errorlevel 1 (
-    echo ERROR: Failed to copy %MOD_DLL% to %GAME_PATH%
-    exit /b 1
-)
-echo   Installed %MOD_DLL%
-
-:: --- Write state file ---
-> "%GAME_PATH%\%STATE_FILE%" (
-    echo {
-    echo   "mod": {
-    echo     "name": "%MOD_INTERNAL_NAME%",
-    echo     "version": "%MOD_VERSION%"
-    echo   },
-    echo   "backup_present": %ERRORLEVEL%
-    echo }
-)
+:: -------- Write state file --------
+:: Shim-only mods never set installed_by_us=true; there's no separate loader.
+set "WE_INSTALLED=false"
+call :write_state_file
 
 echo.
 echo ========================================
 echo   Installation Complete!
 echo ========================================
 echo.
-echo Launch the game normally via Steam.
+echo Launch the game normally.
 echo.
-if defined MOD_CONTROLS echo %MOD_CONTROLS%
-echo.
+if defined MOD_CONTROLS (
+    echo !MOD_CONTROLS!
+    echo.
+)
 exit /b 0
 
 :: ============================================
-:: Find game in Steam libraries (resolves to Build\Final)
+:: Write the canonical state file.
 :: ============================================
-:find_steam_game
-set "STEAM_PATH="
-
-for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\WOW6432Node\Valve\Steam" /v InstallPath 2^>nul') do set "STEAM_PATH=%%b"
-if not defined STEAM_PATH (
-    for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\Valve\Steam" /v InstallPath 2^>nul') do set "STEAM_PATH=%%b"
+:write_state_file
+> "%GAME_PATH%\%STATE_FILE%" (
+    echo {
+    echo   "schema_version": 1,
+    echo   "framework": {
+    echo     "type": "%FRAMEWORK_TYPE%",
+    echo     "installed_by_us": !WE_INSTALLED!
+    echo   },
+    echo   "mod": {
+    echo     "id": "%GAME_ID%",
+    echo     "name": "%MOD_INTERNAL_NAME%",
+    echo     "version": "%MOD_VERSION%"
+    echo   }
+    echo }
 )
-
-if defined STEAM_PATH (
-    if exist "%STEAM_PATH%\steamapps\common\%STEAM_FOLDER_NAME%\%STEAM_SUBFOLDER%\%GAME_EXE%" (
-        set "GAME_PATH=%STEAM_PATH%\steamapps\common\%STEAM_FOLDER_NAME%\%STEAM_SUBFOLDER%"
-        exit /b 0
-    )
-
-    set "VDF_FILE=%STEAM_PATH%\steamapps\libraryfolders.vdf"
-    if exist "!VDF_FILE!" (
-        for /f "tokens=1,2 delims=	 " %%a in ('findstr /c:"\"path\"" "!VDF_FILE!" 2^>nul') do (
-            set "_LIB_PATH=%%~b"
-            set "_LIB_PATH=!_LIB_PATH:\\=\!"
-            if exist "!_LIB_PATH!\steamapps\common\%STEAM_FOLDER_NAME%\%STEAM_SUBFOLDER%\%GAME_EXE%" (
-                set "GAME_PATH=!_LIB_PATH!\steamapps\common\%STEAM_FOLDER_NAME%\%STEAM_SUBFOLDER%"
-                exit /b 0
-            )
-        )
-    )
-)
-
-exit /b 1
+exit /b 0

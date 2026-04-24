@@ -2,123 +2,357 @@
 :: ============================================
 :: BioShock Remastered Head Tracking - Uninstall
 :: ============================================
+:: Based on cameraunlock-core/scripts/templates/uninstall.cmd.
+:: Detection delegated to shared/find-game.ps1 (reads games.json).
+:: Shim-only mod: removes xinput1_3.dll from Build\Final, restoring
+:: Build\Final\xinput1_3.dll.backup if we created one on first install.
+:: /force is a no-op (no loader to remove beyond the shim).
+:: Only the CONFIG BLOCK below is customised for this mod.
+:: ============================================
 
 :: --- CONFIG BLOCK ---
+set "GAME_ID=bioshock-remastered"
 set "MOD_DISPLAY_NAME=BioShock Remastered Head Tracking"
-set "GAME_EXE=BioshockHD.exe"
-set "GAME_DISPLAY_NAME=BioShock Remastered"
-set "STEAM_FOLDER_NAME=BioShock Remastered"
-set "STEAM_SUBFOLDER=Build\Final"
-set "ENV_VAR_NAME=BIOSHOCK_PATH"
-set "MOD_DLL=xinput1_3.dll"
+set "MOD_DLLS=xinput1_3.dll"
+set "MOD_INTERNAL_NAME=BioshockRemasteredHeadTracking"
 set "STATE_FILE=.headtracking-state.json"
+set "FRAMEWORK_TYPE=None"
+set "LEGACY_DLLS="
+
+set "MANAGED_SUBFOLDER="
+set "ASSEMBLY_DLL="
+set "MANAGED_EXTRAS="
+set "ASI_LOADER_NAME=winmm.dll"
 :: --- END CONFIG BLOCK ---
 
 call :main %*
 set "_EC=%errorlevel%"
-echo.
-pause
+if not defined YES_FLAG ( echo. & pause )
 exit /b %_EC%
 
 :main
 setlocal enabledelayedexpansion
 
+:: -------- Arg parser (canonical, do not modify) --------
+set "YES_FLAG="
+set "FORCE_FLAG="
+set "_GIVEN_PATH="
+:parse_args
+if "%~1"=="" goto :args_done
+set "_ARG=%~1"
+if /i "!_ARG!"=="/y"      ( set "YES_FLAG=1"   & shift & goto :parse_args )
+if /i "!_ARG!"=="-y"      ( set "YES_FLAG=1"   & shift & goto :parse_args )
+if /i "!_ARG!"=="--yes"   ( set "YES_FLAG=1"   & shift & goto :parse_args )
+if /i "!_ARG!"=="/force"  ( set "FORCE_FLAG=1" & shift & goto :parse_args )
+if /i "!_ARG!"=="--force" ( set "FORCE_FLAG=1" & shift & goto :parse_args )
+if "!_ARG:~0,2!"=="--" ( echo ERROR: unknown flag "!_ARG!" & exit /b 2 )
+if "!_ARG:~0,1!"=="/"  ( echo ERROR: unknown flag "!_ARG!" & exit /b 2 )
+if "!_ARG:~0,1!"=="-"  ( echo ERROR: unknown flag "!_ARG!" & exit /b 2 )
+if not defined _GIVEN_PATH (
+    if exist "!_ARG!\" ( set "_GIVEN_PATH=!_ARG!" & shift & goto :parse_args )
+)
+echo ERROR: unrecognised argument "!_ARG!"
+exit /b 2
+:args_done
+
 echo.
 echo === %MOD_DISPLAY_NAME% - Uninstall ===
 echo.
 
-set "GAME_PATH="
+set "SCRIPT_DIR=%~dp0"
 
-if not "%~1"=="" (
-    if exist "%~1\%STEAM_SUBFOLDER%\%GAME_EXE%" (
-        set "GAME_PATH=%~1\%STEAM_SUBFOLDER%"
-        goto :found_game
-    )
-    if exist "%~1\%GAME_EXE%" (
-        set "GAME_PATH=%~1"
-        goto :found_game
-    )
+:: -------- Resolve game path via shared shim --------
+set "_SHIM=%SCRIPT_DIR%shared\find-game.ps1"
+if not exist "%_SHIM%" set "_SHIM=%SCRIPT_DIR%..\cameraunlock-core\scripts\find-game.ps1"
+if not exist "%_SHIM%" (
+    echo ERROR: find-game.ps1 not found in shared\ or ..\cameraunlock-core\scripts\.
+    echo If this is a release ZIP, re-download it from GitHub ^(corrupt installer^).
+    echo If this is the dev tree, make sure the cameraunlock-core submodule is checked out.
+    exit /b 1
 )
-
-if defined %ENV_VAR_NAME% (
-    call set "_ENV_PATH=%%%ENV_VAR_NAME%%%"
-    if exist "!_ENV_PATH!\%STEAM_SUBFOLDER%\%GAME_EXE%" (
-        set "GAME_PATH=!_ENV_PATH!\%STEAM_SUBFOLDER%"
-        goto :found_game
-    )
-    if exist "!_ENV_PATH!\%GAME_EXE%" (
-        set "GAME_PATH=!_ENV_PATH!"
-        goto :found_game
-    )
+set "_SHIM_OUT=%TEMP%\cul-find-%RANDOM%-%RANDOM%.cmd"
+set "_GIVEN_ARG="
+if defined _GIVEN_PATH set "_GIVEN_ARG=-GivenPath "!_GIVEN_PATH!""
+powershell -NoProfile -ExecutionPolicy Bypass -File "%_SHIM%" -GameId %GAME_ID% -OutFile "!_SHIM_OUT!" !_GIVEN_ARG!
+set "_PS_EC=!errorlevel!"
+if not "!_PS_EC!"=="0" (
+    echo.
+    echo ERROR: Could not resolve game install path ^(shim exit code !_PS_EC!^).
+    echo Pass a path explicitly: uninstall.cmd "C:\path\to\game"
+    echo.
+    del "!_SHIM_OUT!" 2>nul
+    exit /b 1
 )
+call "!_SHIM_OUT!"
+del "!_SHIM_OUT!" 2>nul
 
-call :find_steam_game
-if defined GAME_PATH goto :found_game
-
-echo %GAME_DISPLAY_NAME% not found - nothing to do.
-exit /b 0
-
-:found_game
 echo Game found: %GAME_PATH%
 echo.
 
+:: -------- Game-running check --------
 tasklist /fi "imagename eq %GAME_EXE%" 2>nul | findstr /i "%GAME_EXE%" >nul 2>&1
 if not errorlevel 1 (
-    echo ERROR: %GAME_DISPLAY_NAME% is currently running. Close it first.
+    echo ERROR: %GAME_DISPLAY_NAME% is currently running.
+    echo Please close the game before uninstalling.
+    echo.
     exit /b 1
 )
 
-set "DEST_DLL=%GAME_PATH%\%MOD_DLL%"
-set "BACKUP_DLL=%DEST_DLL%.backup"
-set "STATE=%GAME_PATH%\%STATE_FILE%"
+:: -------- Compute DEPLOY_DIR per FRAMEWORK_TYPE --------
+call :compute_deploy_dir
+if errorlevel 1 exit /b 1
 
-:: Restore backup if present; otherwise just remove the mod DLL
-if exist "%BACKUP_DLL%" (
-    if exist "%DEST_DLL%" del /q "%DEST_DLL%" >nul 2>&1
-    move /y "%BACKUP_DLL%" "%DEST_DLL%" >nul
-    echo   Restored original %MOD_DLL% from backup
+:: -------- Remove mod files (framework-aware) --------
+if /i "%FRAMEWORK_TYPE%"=="None" (
+    call :remove_shim_files
+) else if /i "%FRAMEWORK_TYPE%"=="MonoCecil" (
+    :: Cecil: restore backup THEN remove our DLLs from Managed/.
+    call :remove_MonoCecil
+    call :remove_mod_files_plain
+    call :remove_managed_extras
 ) else (
-    if exist "%DEST_DLL%" (
-        del /q "%DEST_DLL%" >nul 2>&1
-        echo   Removed %MOD_DLL% (no backup was present)
-        echo   If the game misbehaves, run: Steam ^> right-click %GAME_DISPLAY_NAME% ^> Properties ^> Verify integrity
-    ) else (
-        echo   %MOD_DLL% was not present - nothing to remove
+    call :remove_mod_files_plain
+)
+
+:: -------- Decide whether to remove loader --------
+set "REMOVE_LOADER=0"
+if "!FORCE_FLAG!"=="1" set "REMOVE_LOADER=1"
+if "!REMOVE_LOADER!"=="0" (
+    if exist "%GAME_PATH%\%STATE_FILE%" (
+        findstr /c:"installed_by_us" "%GAME_PATH%\%STATE_FILE%" 2>nul | findstr /c:"true" >nul 2>&1
+        if not errorlevel 1 set "REMOVE_LOADER=1"
     )
 )
 
-if exist "%STATE%" del /q "%STATE%" >nul 2>&1
+if /i "%FRAMEWORK_TYPE%"=="None" (
+    :: Shim-only: already handled in :remove_shim_files above (restores .backup).
+    rem
+) else if /i "%FRAMEWORK_TYPE%"=="MonoCecil" (
+    :: Cecil: the backup restore IS the loader removal. Already done.
+    rem
+) else (
+    if "!REMOVE_LOADER!"=="1" (
+        echo.
+        if "!FORCE_FLAG!"=="1" (
+            echo Removing %FRAMEWORK_TYPE% ^(/force^)...
+        ) else (
+            echo Removing %FRAMEWORK_TYPE% ^(installed by this mod^)...
+        )
+        call :remove_%FRAMEWORK_TYPE%
+    ) else (
+        echo.
+        echo %FRAMEWORK_TYPE% was not installed by this mod - leaving intact. Use /force to remove anyway.
+    )
+)
+
+:: -------- Remove state file --------
+if exist "%GAME_PATH%\%STATE_FILE%" (
+    del "%GAME_PATH%\%STATE_FILE%"
+    echo   Removed: state file
+)
 
 echo.
-echo Uninstall complete. Game is now vanilla.
+echo === Uninstall Complete ===
 echo.
 exit /b 0
 
-:find_steam_game
-set "STEAM_PATH="
-
-for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\WOW6432Node\Valve\Steam" /v InstallPath 2^>nul') do set "STEAM_PATH=%%b"
-if not defined STEAM_PATH (
-    for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\Valve\Steam" /v InstallPath 2^>nul') do set "STEAM_PATH=%%b"
+:: ============================================
+:: compute_deploy_dir: set DEPLOY_DIR based on FRAMEWORK_TYPE.
+:: For ASILoader and None, DEPLOY_DIR is derived from the shim's
+:: GAME_EXE_RELPATH (so nested-exe games like DL2 work).
+:: ============================================
+:compute_deploy_dir
+if /i "%FRAMEWORK_TYPE%"=="BepInEx" (
+    set "DEPLOY_DIR=%GAME_PATH%\BepInEx\plugins"
+    exit /b 0
 )
+if /i "%FRAMEWORK_TYPE%"=="MelonLoader" (
+    set "DEPLOY_DIR=%GAME_PATH%\Mods"
+    exit /b 0
+)
+if /i "%FRAMEWORK_TYPE%"=="REFramework" (
+    set "DEPLOY_DIR=%GAME_PATH%\reframework\plugins"
+    exit /b 0
+)
+if /i "%FRAMEWORK_TYPE%"=="MonoCecil" (
+    set "DEPLOY_DIR=%GAME_PATH%\%MANAGED_SUBFOLDER%"
+    exit /b 0
+)
+if /i "%FRAMEWORK_TYPE%"=="ASILoader" (
+    for %%i in ("%GAME_PATH%\%GAME_EXE_RELPATH%") do set "DEPLOY_DIR=%%~dpi"
+    if "!DEPLOY_DIR:~-1!"=="\" set "DEPLOY_DIR=!DEPLOY_DIR:~0,-1!"
+    exit /b 0
+)
+if /i "%FRAMEWORK_TYPE%"=="None" (
+    for %%i in ("%GAME_PATH%\%GAME_EXE_RELPATH%") do set "DEPLOY_DIR=%%~dpi"
+    if "!DEPLOY_DIR:~-1!"=="\" set "DEPLOY_DIR=!DEPLOY_DIR:~0,-1!"
+    exit /b 0
+)
+echo ERROR: Unknown FRAMEWORK_TYPE "%FRAMEWORK_TYPE%" in uninstall CONFIG BLOCK.
+exit /b 1
 
-if defined STEAM_PATH (
-    if exist "%STEAM_PATH%\steamapps\common\%STEAM_FOLDER_NAME%\%STEAM_SUBFOLDER%\%GAME_EXE%" (
-        set "GAME_PATH=%STEAM_PATH%\steamapps\common\%STEAM_FOLDER_NAME%\%STEAM_SUBFOLDER%"
-        exit /b 0
+:: ============================================
+:: Remove mod DLLs + legacy DLLs from DEPLOY_DIR (framework-generic).
+:: ============================================
+:remove_mod_files_plain
+echo Removing mod files...
+set "REMOVED=0"
+for %%f in (%MOD_DLLS%) do (
+    if exist "!DEPLOY_DIR!\%%f" (
+        del "!DEPLOY_DIR!\%%f"
+        echo   Removed: %%f
+        set /a REMOVED+=1
     )
-
-    set "VDF_FILE=%STEAM_PATH%\steamapps\libraryfolders.vdf"
-    if exist "!VDF_FILE!" (
-        for /f "tokens=1,2 delims=	 " %%a in ('findstr /c:"\"path\"" "!VDF_FILE!" 2^>nul') do (
-            set "_LIB_PATH=%%~b"
-            set "_LIB_PATH=!_LIB_PATH:\\=\!"
-            if exist "!_LIB_PATH!\steamapps\common\%STEAM_FOLDER_NAME%\%STEAM_SUBFOLDER%\%GAME_EXE%" (
-                set "GAME_PATH=!_LIB_PATH!\steamapps\common\%STEAM_FOLDER_NAME%\%STEAM_SUBFOLDER%"
-                exit /b 0
-            )
+)
+if defined LEGACY_DLLS (
+    for %%f in (%LEGACY_DLLS%) do (
+        if exist "!DEPLOY_DIR!\%%f" (
+            del "!DEPLOY_DIR!\%%f"
+            echo   Removed: %%f ^(legacy^)
+            set /a REMOVED+=1
         )
     )
 )
+if "!REMOVED!"=="0" echo   No mod files found
+exit /b 0
 
-exit /b 1
+:: ============================================
+:: Remove extra files Cecil mods leave in Managed/ (configs, logs, etc.).
+:: ============================================
+:remove_managed_extras
+if not defined MANAGED_EXTRAS exit /b 0
+for %%f in (%MANAGED_EXTRAS%) do (
+    if exist "!DEPLOY_DIR!\%%f" (
+        del "!DEPLOY_DIR!\%%f"
+        echo   Removed: %%f
+    )
+)
+exit /b 0
+
+:: ============================================
+:: Remove shim DLLs - restore <name>.backup if present so the user's
+:: pre-mod state comes back. Also handles any LEGACY_DLLS list entries.
+:: ============================================
+:remove_shim_files
+echo Removing shim files...
+set "REMOVED=0"
+for %%f in (%MOD_DLLS%) do (
+    if exist "!DEPLOY_DIR!\%%f.backup" (
+        if exist "!DEPLOY_DIR!\%%f" del /q "!DEPLOY_DIR!\%%f" >nul 2>&1
+        move /y "!DEPLOY_DIR!\%%f.backup" "!DEPLOY_DIR!\%%f" >nul
+        echo   Restored original %%f from backup
+        set /a REMOVED+=1
+    ) else (
+        if exist "!DEPLOY_DIR!\%%f" (
+            del "!DEPLOY_DIR!\%%f"
+            echo   Removed: %%f ^(no backup was present^)
+            set /a REMOVED+=1
+        )
+    )
+)
+if defined LEGACY_DLLS (
+    for %%f in (%LEGACY_DLLS%) do (
+        if exist "!DEPLOY_DIR!\%%f" (
+            del "!DEPLOY_DIR!\%%f"
+            echo   Removed: %%f ^(legacy^)
+            set /a REMOVED+=1
+        )
+    )
+)
+if "!REMOVED!"=="0" echo   No shim files found
+exit /b 0
+
+:: ============================================
+:: Remove BepInEx (regular and BepInExPack both land in the same layout).
+:: ============================================
+:remove_BepInEx
+if exist "%GAME_PATH%\BepInEx" (
+    rmdir /s /q "%GAME_PATH%\BepInEx"
+    echo   Removed: BepInEx folder
+)
+for %%f in (winhttp.dll doorstop_config.ini .doorstop_version changelog.txt) do (
+    if exist "%GAME_PATH%\%%f" (
+        del "%GAME_PATH%\%%f"
+        echo   Removed: %%f
+    )
+)
+exit /b 0
+
+:: ============================================
+:: Remove MelonLoader. Only delete Mods/UserLibs/UserData if empty
+:: (mod-file removal above may leave them clean; users with other
+:: melon mods installed keep their data).
+:: ============================================
+:remove_MelonLoader
+if exist "%GAME_PATH%\MelonLoader" (
+    rmdir /s /q "%GAME_PATH%\MelonLoader"
+    echo   Removed: MelonLoader folder
+)
+for %%f in (version.dll dobby.dll NOTICE.txt) do (
+    if exist "%GAME_PATH%\%%f" (
+        del "%GAME_PATH%\%%f"
+        echo   Removed: %%f
+    )
+)
+for %%d in (Mods UserLibs UserData) do (
+    if exist "%GAME_PATH%\%%d" (
+        dir /b /a "%GAME_PATH%\%%d" 2>nul | findstr /r /v "^$" >nul
+        if errorlevel 1 (
+            rmdir "%GAME_PATH%\%%d" 2>nul
+            if not exist "%GAME_PATH%\%%d" echo   Removed: %%d\ ^(empty^)
+        )
+    )
+)
+exit /b 0
+
+:: ============================================
+:: Mono.Cecil: restore Assembly-CSharp.dll from the .original backup.
+:: The mod DLLs in Managed/ are cleaned up separately by the plain loop.
+:: ============================================
+:remove_MonoCecil
+set "MANAGED_PATH=%GAME_PATH%\%MANAGED_SUBFOLDER%"
+set "ASSEMBLY_PATH=%MANAGED_PATH%\%ASSEMBLY_DLL%"
+set "BACKUP_PATH=%ASSEMBLY_PATH%.original"
+if exist "%BACKUP_PATH%" (
+    copy /y "%BACKUP_PATH%" "%ASSEMBLY_PATH%" >nul
+    del "%BACKUP_PATH%"
+    echo   Restored: %ASSEMBLY_DLL% from backup
+) else (
+    echo   WARNING: no %ASSEMBLY_DLL%.original backup found.
+    echo   Run Steam "Verify integrity of game files" if the game misbehaves.
+)
+exit /b 0
+
+:: ============================================
+:: Remove Ultimate ASI Loader from EXE_DIR.
+:: ============================================
+:remove_ASILoader
+for %%i in ("%GAME_PATH%\%GAME_EXE_RELPATH%") do set "EXE_DIR=%%~dpi"
+if "!EXE_DIR:~-1!"=="\" set "EXE_DIR=!EXE_DIR:~0,-1!"
+for %%f in (%ASI_LOADER_NAME% winmm.dll dinput8.dll xinput1_3.dll) do (
+    if exist "!EXE_DIR!\%%f" (
+        del "!EXE_DIR!\%%f"
+        echo   Removed: %%f
+    )
+)
+exit /b 0
+
+:: ============================================
+:: Remove REFramework.
+:: ============================================
+:remove_REFramework
+if exist "%GAME_PATH%\dinput8.dll" (
+    del "%GAME_PATH%\dinput8.dll"
+    echo   Removed: dinput8.dll
+)
+if exist "%GAME_PATH%\reframework" (
+    rmdir /s /q "%GAME_PATH%\reframework"
+    echo   Removed: reframework/
+)
+exit /b 0
+
+:: ============================================
+:: Shim-only: no framework to remove beyond the shim DLL (handled already).
+:: ============================================
+:remove_None
+exit /b 0
