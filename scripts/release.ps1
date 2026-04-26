@@ -63,14 +63,18 @@ Write-Host ''
 Write-Host '=== BioShock Remastered Head Tracking Release ===' -ForegroundColor Cyan
 Write-Host ''
 
+$current = Get-CargoVersion
+
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    Write-Host "Current version: $(Get-CargoVersion)" -ForegroundColor Yellow
-    Write-Host 'Usage: pixi run release <version>   (e.g. 1.0.0)'
+    Write-Host "Current version: $current" -ForegroundColor Yellow
+    Write-Host 'Usage: pixi run release <major|minor|patch|X.Y.Z>'
     exit 0
 }
 
-if (-not (Test-SemanticVersion -Version $Version)) {
-    Write-Host "Invalid version '$Version'. Use X.Y.Z." -ForegroundColor Red
+try {
+    $Version = Resolve-ReleaseVersion -Argument $Version -CurrentVersion $current
+} catch {
+    Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }
 
@@ -93,7 +97,6 @@ if (-not $Force) {
     }
 }
 
-$current = Get-CargoVersion
 Write-Host "Current version: $current" -ForegroundColor Gray
 Write-Host "New version:     $Version" -ForegroundColor Green
 Write-Host ''
