@@ -299,10 +299,10 @@ mod tests {
         // non-new-sample frame, and on the next-new-sample frame the
         // call lands halfway through the freshly-opened segment.
         let mut interp = Interpolator::new();
-        interp.update(0.0, true, 0.0);                // sample at t=0
-        interp.update(0.0, false, 1.0 / 120.0);       // no-new frame at t=8.33ms
+        interp.update(0.0, true, 0.0); // sample at t=0
+        interp.update(0.0, false, 1.0 / 120.0); // no-new frame at t=8.33ms
         let mid = interp.update(10.0, true, 1.0 / 120.0); // sample at t=16.67ms
-        // sample_interval just became 1/60; progress=0 then += 0.5
+                                                          // sample_interval just became 1/60; progress=0 then += 0.5
         assert!(mid > 4.0 && mid < 6.0, "expected ~5, got {}", mid);
     }
 
@@ -313,7 +313,7 @@ mod tests {
         let mut interp = Interpolator::new();
         interp.update(0.0, true, 0.0);
         interp.update(0.0, false, 1.0 / 120.0);
-        interp.update(10.0, true, 1.0 / 120.0);     // open segment 0->10
+        interp.update(10.0, true, 1.0 / 120.0); // open segment 0->10
         let mid = interp.update(10.0, false, 1.0 / 120.0);
         // Was at 5.0 after the new sample; advance another half.
         assert!(mid > 9.0 && mid <= 10.5, "expected ~10, got {}", mid);

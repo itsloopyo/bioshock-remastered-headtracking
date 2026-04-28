@@ -176,8 +176,7 @@ pub static ATOMIC_POSITION_RECENTER: AtomicRotation = AtomicRotation::new();
 /// same sample to the interpolator on every frame and the EMA
 /// sample-interval estimate would converge to the frame interval
 /// instead of the true sample interval.
-pub static ATOMIC_SAMPLE_SEQ: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub static ATOMIC_SAMPLE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Smoothed rotation in degrees, post-interpolation + post-smoothing,
 /// post-recenter. Written by `smoothing::tick_frame` from the engine
