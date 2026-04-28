@@ -168,6 +168,31 @@ pub static ATOMIC_POSITION: AtomicRotation = AtomicRotation::new();
 /// position to give the head's displacement from the recenter origin.
 pub static ATOMIC_POSITION_RECENTER: AtomicRotation = AtomicRotation::new();
 
+/// Monotonic sample-sequence counter, bumped once per OpenTrack packet
+/// after the rotation+position atomics are written. The smoothing
+/// pipeline compares this to its last-seen value to detect
+/// `is_new_sample` per render frame; without it, a low-rate tracker
+/// (60Hz phone) on a high-refresh display (120Hz+) would re-feed the
+/// same sample to the interpolator on every frame and the EMA
+/// sample-interval estimate would converge to the frame interval
+/// instead of the true sample interval.
+pub static ATOMIC_SAMPLE_SEQ: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Smoothed rotation in degrees, post-interpolation + post-smoothing,
+/// post-recenter. Written by `smoothing::tick_frame` from the engine
+/// hook each render frame; read by the D3D11 reticle overlay so its
+/// projection uses the SAME head pose the engine_hook just baked into
+/// the FRotator. Without sharing this through an atomic, the overlay
+/// would project against raw atomics and the reticle would drift away
+/// from the rendered view by one tracker-period of motion.
+pub static ATOMIC_SMOOTHED_ROTATION: AtomicRotation = AtomicRotation::new();
+
+/// Smoothed body-frame position offset in centimetres
+/// `(right, up, forward)`, post-interpolation + post-smoothing,
+/// post-recenter. Same rationale as `ATOMIC_SMOOTHED_ROTATION`.
+pub static ATOMIC_SMOOTHED_POSITION: AtomicRotation = AtomicRotation::new();
+
 /// Atomic enabled flag for lock-free access
 pub static ATOMIC_ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -213,6 +238,10 @@ impl TrackingState {
         ATOMIC_RECENTER.store(self.yaw, self.pitch, self.roll);
         let (px, py, pz) = ATOMIC_POSITION.load();
         ATOMIC_POSITION_RECENTER.store(px, py, pz);
+        // Drop the smoother / interpolator state so the new center
+        // becomes the parked target instead of a target that the
+        // smoother lerps toward from the old pose.
+        crate::smoothing::reset();
         log::info!(
             "Recentered: yaw={:.2}° pitch={:.2}° roll={:.2}°  pos=({:.2},{:.2},{:.2})cm",
             self.yaw,
@@ -229,6 +258,11 @@ impl TrackingState {
         self.enabled = !self.enabled;
         // Sync to atomic enabled flag
         ATOMIC_ENABLED.store(self.enabled, Ordering::Release);
+        // The smoothing pipeline doesn't tick while tracking is off
+        // (engine_hook returns early). Wipe its `last_frame` instant
+        // so the next re-enable doesn't inject a multi-second dt into
+        // the interpolator.
+        crate::smoothing::reset();
         log::info!(
             "Head tracking {}",
             if self.enabled { "enabled" } else { "disabled" }

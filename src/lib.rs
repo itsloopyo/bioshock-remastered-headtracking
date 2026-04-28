@@ -24,6 +24,7 @@ mod hook_util;
 mod hotkeys;
 mod memory;
 mod opentrack;
+mod smoothing;
 mod tracking;
 
 use std::ffi::c_void;
@@ -202,9 +203,7 @@ fn init_runtime_state() {
     // Touch the lazy global so it constructs before threads race for it.
     let _ = &*GLOBAL_STATE;
 
-    if let Err(e) = opentrack::start_receiver() {
-        log::error!("Failed to start OpenTrack receiver: {}", e);
-    }
+    opentrack::start_receiver();
 
     hotkeys::start_hotkey_thread();
 }

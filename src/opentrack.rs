@@ -19,10 +19,14 @@
 
 use std::io;
 use std::net::UdpSocket;
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
 
-use crate::tracking::{update_position_atomic, update_rotation_atomic, GLOBAL_STATE};
+use std::sync::atomic::Ordering;
+
+use crate::tracking::{
+    update_position_atomic, update_rotation_atomic, ATOMIC_SAMPLE_SEQ, GLOBAL_STATE,
+};
 
 /// OpenTrack UDP port (project-standard default).
 pub const OPENTRACK_PORT: u16 = 4242;
@@ -32,6 +36,12 @@ pub const PACKET_SIZE: usize = 48;
 
 /// Socket read timeout in milliseconds (4ms allows ~250Hz polling)
 const READ_TIMEOUT_MS: u64 = 4;
+
+/// Bind retry cadence when the port is held by another process. Mirrors
+/// `OpenTrackReceiver` in cameraunlock-core/csharp so users get the same
+/// "close the conflicting tracker, tracking comes back" experience.
+const BIND_RETRY_INTERVAL_MS: u64 = 5000;
+const BIND_RETRY_LOG_INTERVAL_MS: u64 = 30000;
 
 /// Parsed OpenTrack data packet
 ///
@@ -95,64 +105,126 @@ impl OpenTrackData {
     }
 }
 
-/// Start the OpenTrack UDP receiver thread
+/// Spawn the OpenTrack UDP receiver thread.
 ///
-/// Binds to 0.0.0.0:4242 and continuously receives packets,
-/// updating the global tracking state with rotation values. Binding to all
-/// interfaces lets phone-based trackers send directly without an OpenTrack
-/// relay on the PC.
-pub fn start_receiver() -> io::Result<JoinHandle<()>> {
-    let socket = UdpSocket::bind(format!("0.0.0.0:{}", OPENTRACK_PORT))?;
-    socket.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)))?;
+/// The thread first tries to bind `0.0.0.0:4242`. If another process is
+/// holding the port, it retries every 5s (logging every 30s) until either
+/// the bind succeeds or shutdown is requested. The rest of the mod
+/// (engine hook, hotkey poller, D3D overlay) keeps running through the
+/// retry, so closing the conflicting tracker brings head tracking back
+/// to life with no game restart. Binding to all interfaces lets
+/// phone-based trackers send directly without an OpenTrack relay on the
+/// PC.
+pub fn start_receiver() {
+    thread::spawn(|| {
+        let Some(socket) = bind_with_retry() else {
+            return;
+        };
+        if let Err(e) = socket.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS))) {
+            log::error!("Failed to set OpenTrack socket read timeout: {}", e);
+            return;
+        }
+        receive_loop(socket);
+    });
+}
 
-    log::info!("OpenTrack receiver started on port {}", OPENTRACK_PORT);
+fn bind_with_retry() -> Option<UdpSocket> {
+    let addr = format!("0.0.0.0:{}", OPENTRACK_PORT);
 
-    let handle = thread::spawn(move || {
-        let mut buf = [0u8; PACKET_SIZE];
+    match UdpSocket::bind(&addr) {
+        Ok(socket) => {
+            log::info!("OpenTrack receiver started on port {}", OPENTRACK_PORT);
+            return Some(socket);
+        }
+        Err(e) => {
+            log::error!(
+                "Failed to bind UDP port {} ({}) -- will retry every {}s",
+                OPENTRACK_PORT,
+                e,
+                BIND_RETRY_INTERVAL_MS / 1000
+            );
+        }
+    }
 
-        loop {
-            // Check if shutdown requested
-            {
-                let state = GLOBAL_STATE.read();
-                if state.shutdown_requested {
-                    log::info!("OpenTrack receiver shutting down");
-                    break;
-                }
+    let attempts_per_log = BIND_RETRY_LOG_INTERVAL_MS / BIND_RETRY_INTERVAL_MS;
+    let mut attempts: u64 = 0;
+    loop {
+        // Sleep in 100ms slices so shutdown_requested is honoured promptly.
+        for _ in 0..(BIND_RETRY_INTERVAL_MS / 100) {
+            if GLOBAL_STATE.read().shutdown_requested {
+                return None;
             }
+            thread::sleep(Duration::from_millis(100));
+        }
 
-            match socket.recv(&mut buf) {
-                Ok(PACKET_SIZE) => {
-                    let data = OpenTrackData::from_bytes(&buf);
-
-                    // Update rotation + position using lock-free atomics
-                    // (optimized hot path).
-                    update_rotation_atomic(data.yaw, data.pitch, data.roll);
-                    update_position_atomic(data.x, data.y, data.z);
-
-                    // Also update GLOBAL_STATE for legacy compatibility
-                    // This is less frequent than reads, so RwLock overhead is acceptable
-                    let mut state = GLOBAL_STATE.write();
-                    state.yaw = data.yaw;
-                    state.pitch = data.pitch;
-                    state.roll = data.roll;
-                }
-                Ok(size) => {
-                    log::warn!("Received packet with unexpected size: {} bytes", size);
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // Timeout, no data available - this is normal
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    // Timeout, no data available - this is normal
-                }
-                Err(e) => {
-                    log::error!("UDP receive error: {}", e);
+        attempts += 1;
+        match UdpSocket::bind(&addr) {
+            Ok(socket) => {
+                log::info!(
+                    "Bound UDP port {} after {} retries",
+                    OPENTRACK_PORT,
+                    attempts
+                );
+                return Some(socket);
+            }
+            Err(_) => {
+                if attempts.is_multiple_of(attempts_per_log) {
+                    log::warn!(
+                        "Still waiting for UDP port {} ({}s elapsed)",
+                        OPENTRACK_PORT,
+                        attempts * BIND_RETRY_INTERVAL_MS / 1000
+                    );
                 }
             }
         }
-    });
+    }
+}
 
-    Ok(handle)
+fn receive_loop(socket: UdpSocket) {
+    let mut buf = [0u8; PACKET_SIZE];
+
+    loop {
+        if GLOBAL_STATE.read().shutdown_requested {
+            log::info!("OpenTrack receiver shutting down");
+            break;
+        }
+
+        match socket.recv(&mut buf) {
+            Ok(PACKET_SIZE) => {
+                let data = OpenTrackData::from_bytes(&buf);
+
+                // Update rotation + position using lock-free atomics
+                // (optimized hot path).
+                update_rotation_atomic(data.yaw, data.pitch, data.roll);
+                update_position_atomic(data.x, data.y, data.z);
+                // Bump the sequence counter AFTER the value writes.
+                // Release ordering pairs with the Acquire load on the
+                // render thread so the new yaw/pitch/roll are
+                // guaranteed visible to the smoothing pipeline once it
+                // observes the new sequence number.
+                ATOMIC_SAMPLE_SEQ.fetch_add(1, Ordering::Release);
+
+                // Also update GLOBAL_STATE for legacy compatibility
+                // This is less frequent than reads, so RwLock overhead is acceptable
+                let mut state = GLOBAL_STATE.write();
+                state.yaw = data.yaw;
+                state.pitch = data.pitch;
+                state.roll = data.roll;
+            }
+            Ok(size) => {
+                log::warn!("Received packet with unexpected size: {} bytes", size);
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Timeout, no data available - this is normal
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
+                // Timeout, no data available - this is normal
+            }
+            Err(e) => {
+                log::error!("UDP receive error: {}", e);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
