@@ -117,6 +117,9 @@ foreach ($doc in @('README.md', 'LICENSE', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES
     if (Test-Path $p) { Copy-Item -Path $p -Destination $installerStaging -Force }
 }
 
+Import-Module (Join-Path $projectRoot 'cameraunlock-core\powershell\ReleaseWorkflow.psm1') -Force
+Copy-SharedBundle -StagingDir $installerStaging
+
 $installerZip = New-ZipFromStaging -Name "$modName-v$version-installer.zip" -StagingDir $installerStaging
 Remove-Item $installerStaging -Recurse -Force
 
