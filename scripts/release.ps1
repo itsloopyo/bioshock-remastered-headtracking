@@ -101,12 +101,6 @@ Write-Host "Current version: $current" -ForegroundColor Gray
 Write-Host "New version:     $Version" -ForegroundColor Green
 Write-Host ''
 
-$confirm = Read-Host 'Continue? (y/N)'
-if ($confirm -ne 'y' -and $confirm -ne 'Y') {
-    Write-Host 'Cancelled.' -ForegroundColor Yellow
-    exit 0
-}
-
 # Step 1 - bump version
 Write-Host "Updating Cargo.toml to $Version..." -ForegroundColor Cyan
 Set-CargoVersion -NewVersion $Version
