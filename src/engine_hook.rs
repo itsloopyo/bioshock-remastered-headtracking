@@ -33,10 +33,7 @@ use std::time::Instant;
 use once_cell::sync::OnceCell;
 
 use crate::hook_util::install_hook;
-use crate::tracking::{
-    get_recentered_position_atomic, get_recentered_rotation_atomic, is_enabled_atomic,
-    is_position_enabled_atomic,
-};
+use crate::tracking::{is_enabled_atomic, is_position_enabled_atomic};
 
 /// UE2.5 FRotator layout.
 #[repr(C)]
@@ -185,7 +182,15 @@ unsafe extern "thiscall" fn event_player_calc_view_detour(
         return;
     }
 
-    let (yaw_deg, pitch_deg, roll_deg) = get_recentered_rotation_atomic();
+    // Drive the per-axis interpolator + smoother once per frame. The
+    // interpolator bridges low-rate trackers (60Hz phone) to the
+    // display refresh rate so the camera advances every frame instead
+    // of every other frame. Both rotation and position are returned;
+    // the same values are also published to ATOMIC_SMOOTHED_* so the
+    // D3D overlay's reticle projection stays glued to the rendered
+    // view.
+    let pose = crate::smoothing::tick_frame();
+    let (yaw_deg, pitch_deg, roll_deg) = pose.rotation;
 
     // Roll is inverted: BioShock's FRotator.Roll increases clockwise
     // around the view axis, OpenTrack reports counter-clockwise positive.
@@ -200,7 +205,7 @@ unsafe extern "thiscall" fn event_player_calc_view_detour(
     // "into the screen" relative to the player's in-world heading,
     // not where their head is currently turned.
     if is_position_enabled_atomic() && !camera_location.is_null() {
-        let (right_cm, up_cm, forward_cm) = get_recentered_position_atomic();
+        let (right_cm, up_cm, forward_cm) = pose.position;
 
         let right = right_cm.clamp(-POS_LIMIT_SIDE_CM, POS_LIMIT_SIDE_CM);
         let up = up_cm.clamp(-POS_LIMIT_DOWN_CM, POS_LIMIT_UP_CM);

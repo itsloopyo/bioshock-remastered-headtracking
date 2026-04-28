@@ -210,7 +210,12 @@ unsafe extern "system" fn hooked_present(this: *mut c_void, sync_interval: u32, 
     // Draw our reticle on top of the game's final frame, just before
     // the swap. Only does anything when head tracking is enabled.
     if crate::tracking::is_enabled_atomic() {
-        let (yaw_deg, pitch_deg, roll_deg) = crate::tracking::get_recentered_rotation_atomic();
+        // Read the SAME smoothed values engine_hook just wrote into
+        // the FRotator. Reading the raw recentered atomic here would
+        // make the reticle drift away from the rendered view by one
+        // tracker-period of motion (jitter on phone trackers, ~16ms
+        // lag at 60Hz).
+        let (yaw_deg, pitch_deg, roll_deg) = crate::tracking::ATOMIC_SMOOTHED_ROTATION.load();
         super::overlay::draw(this, yaw_deg, pitch_deg, roll_deg);
     }
 
