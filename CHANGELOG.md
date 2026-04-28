@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.0] - 2026-04-29
+
+### Added
+
+- per-axis smoothing pipeline and resilient UDP bind
+
 ## [0.1.1] - 2026-04-19
 
 ### Fixed
