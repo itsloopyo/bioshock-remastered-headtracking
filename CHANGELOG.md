@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.2] - 2026-04-29
+
+### Added
+
+- cycle rotation/position tracking on Page Up
+
+### Other
+
+- build: bundle shared installer scripts in release ZIP
+- chore: bump cameraunlock-core to 2c5511e
+
 ## [0.2.0] - 2026-04-29
 
 ### Added
