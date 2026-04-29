@@ -129,7 +129,12 @@ pub struct TrackingState {
     /// Recenter offset, subtracted from rotation values (Home / Ctrl+Shift+T).
     pub recenter_offset: (f64, f64, f64),
 
-    /// 6DOF positional tracking toggle.
+    /// Rotational-tracking flag, cycled by the tracking-mode hotkey
+    /// (Page Up / Ctrl+Shift+G) alongside `position_enabled`.
+    pub rotation_enabled: bool,
+
+    /// 6DOF positional tracking flag, cycled by the tracking-mode
+    /// hotkey (Page Up / Ctrl+Shift+G) alongside `rotation_enabled`.
     pub position_enabled: bool,
 
     /// True when in active gameplay, false during menus/cutscenes
@@ -141,8 +146,8 @@ pub struct TrackingState {
     /// Debounce timer for the recenter hotkey.
     pub last_recenter_time: Instant,
 
-    /// Debounce timer for the position toggle.
-    pub last_position_time: Instant,
+    /// Debounce timer for the tracking-mode cycle hotkey.
+    pub last_cycle_mode_time: Instant,
 
     /// Signal for threads to shutdown
     pub shutdown_requested: bool,
@@ -208,12 +213,13 @@ impl Default for TrackingState {
             pitch: 0.0,
             roll: 0.0,
             recenter_offset: (0.0, 0.0, 0.0),
+            rotation_enabled: true,
             position_enabled: true,
             // Start active - state detector defaults to Gameplay
             gameplay_active: true,
             last_toggle_time: now,
             last_recenter_time: now,
-            last_position_time: now,
+            last_cycle_mode_time: now,
             shutdown_requested: false,
         }
     }
@@ -268,18 +274,27 @@ impl TrackingState {
         );
     }
 
-    /// Toggle 6DOF position tracking.
-    pub fn toggle_position(&mut self) {
-        self.position_enabled = !self.position_enabled;
-        ATOMIC_POSITION_ENABLED.store(self.position_enabled, Ordering::Release);
-        log::info!(
-            "Position tracking {}",
-            if self.position_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        );
+    /// Advance the rotation/position cycle by one step. The cycle has
+    /// three states: both axes on (normal), rotation only, position
+    /// only. From "position only" the next press wraps back to "both
+    /// on".
+    pub fn cycle_tracking_mode(&mut self) {
+        let (next_rot, next_pos) = match (self.rotation_enabled, self.position_enabled) {
+            (true, true) => (true, false),
+            (true, false) => (false, true),
+            _ => (true, true),
+        };
+        self.rotation_enabled = next_rot;
+        self.position_enabled = next_pos;
+        ATOMIC_ROTATION_ENABLED.store(next_rot, Ordering::Release);
+        ATOMIC_POSITION_ENABLED.store(next_pos, Ordering::Release);
+        let label = match (next_rot, next_pos) {
+            (true, true) => "rotation + position",
+            (true, false) => "rotation only",
+            (false, true) => "position only",
+            (false, false) => "all axes off",
+        };
+        log::info!("Tracking mode: {label}");
     }
 }
 
@@ -348,7 +363,17 @@ pub fn get_recentered_position_atomic() -> (f64, f64, f64) {
     (-(x - ox), y - oy, -(z - oz))
 }
 
-/// Lock-free check for the position-tracking toggle. The hotkey
+/// Lock-free check for the rotation-tracking flag. Mirrored from
+/// `TrackingState::rotation_enabled` so the engine hook can gate the
+/// rotation block per frame without a lock.
+pub static ATOMIC_ROTATION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+#[inline(always)]
+pub fn is_rotation_enabled_atomic() -> bool {
+    ATOMIC_ROTATION_ENABLED.load(Ordering::Acquire)
+}
+
+/// Lock-free check for the position-tracking flag. The hotkey
 /// thread mutates `position_enabled` under the global write-lock;
 /// this static mirror is updated alongside it for hot-path reads.
 pub static ATOMIC_POSITION_ENABLED: AtomicBool = AtomicBool::new(true);

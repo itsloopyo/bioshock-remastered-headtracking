@@ -33,7 +33,7 @@ use std::time::Instant;
 use once_cell::sync::OnceCell;
 
 use crate::hook_util::install_hook;
-use crate::tracking::{is_enabled_atomic, is_position_enabled_atomic};
+use crate::tracking::{is_enabled_atomic, is_position_enabled_atomic, is_rotation_enabled_atomic};
 
 /// UE2.5 FRotator layout.
 #[repr(C)]
@@ -194,10 +194,12 @@ unsafe extern "thiscall" fn event_player_calc_view_detour(
 
     // Roll is inverted: BioShock's FRotator.Roll increases clockwise
     // around the view axis, OpenTrack reports counter-clockwise positive.
-    let rot = &mut *camera_rotation;
-    rot.pitch = rot.pitch.wrapping_add(deg_to_units(pitch_deg));
-    rot.yaw = rot.yaw.wrapping_add(deg_to_units(yaw_deg));
-    rot.roll = rot.roll.wrapping_add(deg_to_units(-roll_deg));
+    if is_rotation_enabled_atomic() {
+        let rot = &mut *camera_rotation;
+        rot.pitch = rot.pitch.wrapping_add(deg_to_units(pitch_deg));
+        rot.yaw = rot.yaw.wrapping_add(deg_to_units(yaw_deg));
+        rot.roll = rot.roll.wrapping_add(deg_to_units(-roll_deg));
+    }
 
     // 6DOF position. Apply the head's translational delta to the
     // engine's CameraLocation FVector. Lateral / forward components
