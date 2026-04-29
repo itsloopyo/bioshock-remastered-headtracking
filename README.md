@@ -63,11 +63,18 @@ gyro data is too jittery for use.
 
 Two equivalent binding sets - use whichever your keyboard has:
 
-| Action            | Nav-cluster | Chord            |
-|-------------------|-------------|------------------|
-| Recenter          | `Home`      | `Ctrl+Shift+T`   |
-| Toggle tracking   | `End`       | `Ctrl+Shift+Y`   |
-| Toggle 6DOF pos.  | `Page Up`   | `Ctrl+Shift+G`   |
+| Action              | Nav-cluster | Chord           |
+|---------------------|-------------|-----------------|
+| Recenter            | `Home`      | `Ctrl+Shift+T`  |
+| Toggle tracking     | `End`       | `Ctrl+Shift+Y`  |
+| Cycle tracking mode | `Page Up`   | `Ctrl+Shift+G`  |
+
+`Page Up` / `Ctrl+Shift+G` cycles tracking mode:
+
+1. Normal head-tracked gameplay
+2. Positional tracking disabled, rotational tracking enabled
+3. Rotational tracking disabled, positional tracking enabled
+4. Back to normal
 
 The chord letters T/Y/G sit in a vertical strip in the centre of
 the keyboard. `Ctrl+Shift+<letter>` is universally avoided by games,

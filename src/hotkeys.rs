@@ -3,11 +3,11 @@
 //! Polls the Windows keyboard state at ~100Hz on a dedicated thread.
 //! Two equivalent binding sets per the project standard:
 //!
-//! | Action          | Nav-cluster | Chord          |
-//! |-----------------|-------------|----------------|
-//! | Recenter        | Home        | Ctrl+Shift+T   |
-//! | Toggle tracking | End         | Ctrl+Shift+Y   |
-//! | Toggle position | PageUp      | Ctrl+Shift+G   |
+//! | Action              | Nav-cluster | Chord          |
+//! |---------------------|-------------|----------------|
+//! | Recenter            | Home        | Ctrl+Shift+T   |
+//! | Toggle tracking     | End         | Ctrl+Shift+Y   |
+//! | Cycle tracking mode | Page Up     | Ctrl+Shift+G   |
 //!
 //! The chord letters T/Y/G form a vertical 1x3 strip in the
 //! T/Y/U/G/H/J cluster on the keyboard - easy to recall.
@@ -15,6 +15,10 @@
 //! crouch / interact, Shift is sprint / weapon-wheel, both together
 //! is well outside any in-game bind set), so the chord set works
 //! reliably across every game in the CameraUnlock project.
+//!
+//! `Page Up` / `Ctrl+Shift+G` is a three-state cycle, not a binary
+//! toggle: rotation+position -> rotation only -> position only ->
+//! back to rotation+position.
 //!
 //! Each action has an independent 300ms debounce to prevent held-key
 //! repeats.
@@ -76,8 +80,8 @@ fn tick(state: &mut TrackingState) {
     if fired(VK_END, VK_Y, &mut state.last_toggle_time, debounce) {
         state.toggle();
     }
-    if fired(VK_PAGE_UP, VK_G, &mut state.last_position_time, debounce) {
-        state.toggle_position();
+    if fired(VK_PAGE_UP, VK_G, &mut state.last_cycle_mode_time, debounce) {
+        state.cycle_tracking_mode();
     }
 }
 

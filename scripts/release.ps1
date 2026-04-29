@@ -125,7 +125,7 @@ if (-not $hasTags) {
     $args = @{
         ChangelogPath = $changelogPath
         Version       = $Version
-        ArtifactPaths = @('src/', 'cameraunlock-core', 'scripts/install.cmd', 'scripts/uninstall.cmd')
+        ArtifactPaths = @('src/', 'cameraunlock-core', 'scripts/')
     }
     if ($Force) { $args.IncludeAll = $true }
     New-ChangelogFromCommits @args
