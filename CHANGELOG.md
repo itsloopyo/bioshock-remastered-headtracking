@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0] - 2026-04-30
+
+### Fixed
+
+- skip rotation compensation in reticle projection when rotation tracking is off
+
+### Other
+
+- Expand submodule pointer commits in generated changelogs
+- Fix /y flag detection and bundle vendored BepInEx in installers
+- Use WriteAllBytes for .cmd output to avoid Defender race
+
 ## [0.2.2] - 2026-04-29
 
 ### Added
