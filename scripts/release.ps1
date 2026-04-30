@@ -17,16 +17,12 @@
 .PARAMETER Version
     Semver string (e.g. "1.0.0"). Required.
 
-.PARAMETER Force
-    Skip the branch / clean-tree / tag-exists guards (use sparingly).
-
 .EXAMPLE
     pixi run release 1.0.0
 #>
 param(
     [Parameter(Position = 0)]
-    [string]$Version = '',
-    [switch]$Force
+    [string]$Version = ''
 )
 
 Set-StrictMode -Version Latest
@@ -80,21 +76,19 @@ try {
 
 $tag = "v$Version"
 
-if (-not $Force) {
-    $branch = git rev-parse --abbrev-ref HEAD
-    if ($branch -ne 'main') {
-        Write-Host "Must be on main branch to release (currently on '$branch')" -ForegroundColor Red
-        exit 1
-    }
-    if (-not (Test-CleanGitStatus)) {
-        Write-Host 'Working tree has uncommitted changes - commit or stash first.' -ForegroundColor Red
-        git status --short
-        exit 1
-    }
-    if (Test-GitTagExists -Tag $tag) {
-        Write-Host "Tag '$tag' already exists." -ForegroundColor Red
-        exit 1
-    }
+$branch = git rev-parse --abbrev-ref HEAD
+if ($branch -ne 'main') {
+    Write-Host "Must be on main branch to release (currently on '$branch')" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-CleanGitStatus)) {
+    Write-Host 'Working tree has uncommitted changes - commit or stash first.' -ForegroundColor Red
+    git status --short
+    exit 1
+}
+if (Test-GitTagExists -Tag $tag) {
+    Write-Host "Tag '$tag' already exists." -ForegroundColor Red
+    exit 1
 }
 
 Write-Host "Current version: $current" -ForegroundColor Gray
@@ -127,7 +121,6 @@ if (-not $hasTags) {
         Version       = $Version
         ArtifactPaths = @('src/', 'cameraunlock-core', 'scripts/')
     }
-    if ($Force) { $args.IncludeAll = $true }
     New-ChangelogFromCommits @args
 }
 
