@@ -1,14 +1,8 @@
 @echo off
 :: ============================================
-:: BioShock Remastered Head Tracking - Install
+:: Bioshock Remastered - Install
 :: ============================================
-:: Based on cameraunlock-core/scripts/templates/install-shim.cmd.
-:: Detection delegated to shared/find-game.ps1 (reads games.json).
-:: Shim-only mod: xinput1_3.dll IS the mod DLL. No external framework.
-:: The exe lives at Build\Final\BioshockHD.exe so EXE_DIR ends up being
-:: <game>\Build\Final.
-:: Only the CONFIG BLOCK below is customised for this mod.
-:: ============================================
+:: Thin wrapper - install body lives in cameraunlock-core/scripts/install-body-shim.cmd.
 
 :: --- CONFIG BLOCK ---
 set "GAME_ID=bioshock-remastered"
@@ -21,171 +15,14 @@ set "FRAMEWORK_TYPE=None"
 set "MOD_CONTROLS=Controls (nav cluster / chord):&echo   Home    / Ctrl+Shift+T  Recenter&echo   End     / Ctrl+Shift+Y  Toggle tracking&echo   PageUp  / Ctrl+Shift+G  Toggle 6DOF position"
 :: --- END CONFIG BLOCK ---
 
-call :detect_yes_flag %*
-call :main %*
-set "_EC=%errorlevel%"
-if not defined YES_FLAG ( echo. & pause )
-exit /b %_EC%
-
-:: ============================================
-:: Pre-scan args at outer scope so YES_FLAG propagates to the post-:main
-:: pause check. :main's arg parser sets its own (local) YES_FLAG too, but
-:: cmd.exe discards local vars when setlocal pops on `exit /b`, so without
-:: this pre-scan the post-:main `if not defined YES_FLAG` always pauses
-:: and /y can't make the script headless. Square brackets are used (not
-:: quotes) to dodge cmd's path-with-trailing-backslash quoting hazard.
-:: ============================================
-:detect_yes_flag
-if [%1]==[] exit /b 0
-if /i [%~1]==[/y]    set "YES_FLAG=1"
-if /i [%~1]==[-y]    set "YES_FLAG=1"
-if /i [%~1]==[--yes] set "YES_FLAG=1"
-shift
-goto :detect_yes_flag
-
-:main
-setlocal enabledelayedexpansion
-
-:: Capture script dir BEFORE the arg parser runs. Inside `call :main`,
-:: `shift` rotates %0 too, so %~dp0 read after shifts resolves to the
-:: dirname of the first arg (e.g. C:\ for /y) instead of the script.
-set "SCRIPT_DIR=%~dp0"
-
-:: -------- Arg parser (canonical, do not modify) --------
-set "YES_FLAG="
-set "_GIVEN_PATH="
-:parse_args
-if "%~1"=="" goto :args_done
-set "_ARG=%~1"
-if /i "!_ARG!"=="/y"    ( set "YES_FLAG=1" & shift & goto :parse_args )
-if /i "!_ARG!"=="-y"    ( set "YES_FLAG=1" & shift & goto :parse_args )
-if /i "!_ARG!"=="--yes" ( set "YES_FLAG=1" & shift & goto :parse_args )
-if "!_ARG:~0,2!"=="--" ( echo ERROR: unknown flag "!_ARG!" & exit /b 2 )
-if "!_ARG:~0,1!"=="/"  ( echo ERROR: unknown flag "!_ARG!" & exit /b 2 )
-if "!_ARG:~0,1!"=="-"  ( echo ERROR: unknown flag "!_ARG!" & exit /b 2 )
-if not defined _GIVEN_PATH (
-    if exist "!_ARG!\" ( set "_GIVEN_PATH=!_ARG!" & shift & goto :parse_args )
-)
-echo ERROR: unrecognised argument "!_ARG!"
-exit /b 2
-:args_done
-
-echo.
-echo === %MOD_DISPLAY_NAME% - Install ===
-echo.
-
-:: -------- Resolve game path via shared shim --------
-set "_SHIM=%SCRIPT_DIR%shared\find-game.ps1"
-if not exist "%_SHIM%" set "_SHIM=%SCRIPT_DIR%..\cameraunlock-core\scripts\find-game.ps1"
-if not exist "%_SHIM%" (
-    echo ERROR: find-game.ps1 not found in shared\ or ..\cameraunlock-core\scripts\.
+set "WRAPPER_DIR=%~dp0"
+set "_BODY=%WRAPPER_DIR%shared\install-body-shim.cmd"
+if not exist "%_BODY%" set "_BODY=%WRAPPER_DIR%..\cameraunlock-core\scripts\install-body-shim.cmd"
+if not exist "%_BODY%" (
+    echo ERROR: install-body-shim.cmd not found in shared\ or ..\cameraunlock-core\scripts\.
     echo If this is a release ZIP, re-download it from GitHub ^(corrupt installer^).
-    echo If this is the dev tree, make sure the cameraunlock-core submodule is checked out.
+    echo If this is the dev tree, run: git submodule update --init --recursive
     exit /b 1
 )
-set "_SHIM_OUT=%TEMP%\cul-find-%RANDOM%-%RANDOM%.cmd"
-set "_GIVEN_ARG="
-if defined _GIVEN_PATH set "_GIVEN_ARG=-GivenPath "!_GIVEN_PATH!""
-powershell -NoProfile -ExecutionPolicy Bypass -File "%_SHIM%" -GameId %GAME_ID% -OutFile "!_SHIM_OUT!" !_GIVEN_ARG!
-set "_PS_EC=!errorlevel!"
-if not "!_PS_EC!"=="0" (
-    echo.
-    echo ERROR: Could not resolve game install path ^(shim exit code !_PS_EC!^).
-    echo Pass a path explicitly: install.cmd "C:\path\to\game"
-    echo.
-    del "!_SHIM_OUT!" 2>nul
-    exit /b 1
-)
-call "!_SHIM_OUT!"
-del "!_SHIM_OUT!" 2>nul
-
-echo Game found: %GAME_PATH%
-
-:: Derive EXE_DIR (where shim DLLs land) from GAME_PATH + GAME_EXE_RELPATH.
-for %%i in ("%GAME_PATH%\%GAME_EXE_RELPATH%") do set "EXE_DIR=%%~dpi"
-if "!EXE_DIR:~-1!"=="\" set "EXE_DIR=!EXE_DIR:~0,-1!"
-echo Exe dir : %EXE_DIR%
-echo.
-
-:: -------- Game-running check --------
-tasklist /fi "imagename eq %GAME_EXE%" 2>nul | findstr /i "%GAME_EXE%" >nul 2>&1
-if not errorlevel 1 (
-    echo ERROR: %GAME_DISPLAY_NAME% is currently running.
-    echo Please close the game before installing.
-    echo.
-    exit /b 1
-)
-
-:: -------- Deploy shim DLL(s) --------
-:: For each entry in MOD_DLLS: if an existing file is present at that name
-:: in EXE_DIR (could be a stock system DLL the game uses or a prior version
-:: of our own shim), back it up to <name>.backup on the *first* install.
-:: If a .backup is already present, leave it alone - we must keep the
-:: user's pre-mod state intact across our re-installs.
-echo Deploying shim files...
-
-set "SRC_DIR=%SCRIPT_DIR%plugins"
-set "DEPLOY_FAILED=0"
-
-for %%f in (%MOD_DLLS%) do (
-    if not exist "%SRC_DIR%\%%f" (
-        echo   ERROR: %%f not found in plugins folder
-        set "DEPLOY_FAILED=1"
-    ) else (
-        if exist "%EXE_DIR%\%%f" (
-            if not exist "%EXE_DIR%\%%f.backup" (
-                copy /y "%EXE_DIR%\%%f" "%EXE_DIR%\%%f.backup" >nul
-                echo   Backed up original %%f to %%f.backup
-            )
-        )
-        copy /y "%SRC_DIR%\%%f" "%EXE_DIR%\%%f" >nul
-        echo   Deployed %%f
-    )
-)
-
-if "!DEPLOY_FAILED!"=="1" (
-    echo.
-    echo ========================================
-    echo   Deployment Failed!
-    echo ========================================
-    echo.
-    exit /b 1
-)
-
-:: -------- Write state file --------
-:: Shim-only mods never set installed_by_us=true; there's no separate loader.
-set "WE_INSTALLED=false"
-call :write_state_file
-
-echo.
-echo ========================================
-echo   Installation Complete!
-echo ========================================
-echo.
-echo Launch the game normally.
-echo.
-if defined MOD_CONTROLS (
-    echo !MOD_CONTROLS!
-    echo.
-)
-exit /b 0
-
-:: ============================================
-:: Write the canonical state file.
-:: ============================================
-:write_state_file
-> "%GAME_PATH%\%STATE_FILE%" (
-    echo {
-    echo   "schema_version": 1,
-    echo   "framework": {
-    echo     "type": "%FRAMEWORK_TYPE%",
-    echo     "installed_by_us": !WE_INSTALLED!
-    echo   },
-    echo   "mod": {
-    echo     "id": "%GAME_ID%",
-    echo     "name": "%MOD_INTERNAL_NAME%",
-    echo     "version": "%MOD_VERSION%"
-    echo   }
-    echo }
-)
-exit /b 0
+call "%_BODY%" %*
+exit /b %errorlevel%
