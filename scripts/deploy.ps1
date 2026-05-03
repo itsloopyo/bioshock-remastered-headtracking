@@ -22,13 +22,15 @@ $projectRoot = Split-Path -Parent $scriptDir
 
 Import-Module (Join-Path $projectRoot "cameraunlock-core\powershell\DevDeploy.psm1") -Force
 Import-Module (Join-Path $projectRoot "cameraunlock-core\powershell\ModDeployment.psm1") -Force
+# Cargo emits lowercase profile dirs (debug / release), not Debug/Release.
+$cargoProfile = $Configuration.ToLower()
+$buildOutput = Join-Path $projectRoot "target\i686-pc-windows-msvc\$cargoProfile"
 $result = Invoke-DevDeployShim `
     -GameId 'bioshock-remastered' `
     -GameDisplayName 'Bioshock Remastered' `
-    -ProjectRoot $projectRoot `
-    -ProjectName 'BioshockRemasteredHeadTracking' `
-    -ModDllName 'BioshockRemasteredHeadTracking.dll' `
-    -Configuration $Configuration `
+    -BuildOutputPath $buildOutput `
+    -ModDllName 'xinput1_3.dll' `
+    -SourceDllName 'bioshock_headtrack.dll' `
     -ExtraDlls @() `
     -GivenPath $GivenPath
 
