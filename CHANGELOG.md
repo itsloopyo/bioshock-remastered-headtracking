@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.2] - 2026-05-03
+
+### Added
+
+- center game window on first frame to fix ultrawide top-left launch
+
+### Other
+
+- Verify existing BepInEx loader arch and replace on mismatch
+- Fall back to dev-tree vendor path in BepInEx install body
+
 ## [0.3.1] - 2026-05-03
 
 ### Other
