@@ -31,6 +31,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_MODE_DESC, DXGI_MODE_SCALING_UNSPECIFIED,
     DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
+use windows::core::Interface;
 use windows::Win32::Graphics::Dxgi::{
     IDXGISwapChain, DXGI_SWAP_CHAIN_DESC, DXGI_SWAP_EFFECT_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
@@ -207,6 +208,15 @@ fn get_vtable_addrs() -> Result<VtableAddrs, &'static str> {
 // =========================================================================
 
 unsafe extern "system" fn hooked_present(this: *mut c_void, sync_interval: u32, flags: u32) -> i32 {
+    // First-frame chore: center the game window on its monitor if it
+    // launched in the top-left of an ultrawide. No-op after the first
+    // call, so users can still drag the window afterwards.
+    if let Some(sc) = IDXGISwapChain::from_raw_borrowed(&this) {
+        if let Ok(desc) = sc.GetDesc() {
+            crate::window::center_once(desc.OutputWindow);
+        }
+    }
+
     // Draw our reticle on top of the game's final frame, just before
     // the swap. Only does anything when head tracking is enabled.
     if crate::tracking::is_enabled_atomic() {

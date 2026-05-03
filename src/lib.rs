@@ -26,6 +26,7 @@ mod memory;
 mod opentrack;
 mod smoothing;
 mod tracking;
+mod window;
 
 use std::ffi::c_void;
 
