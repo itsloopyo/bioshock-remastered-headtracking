@@ -22,7 +22,6 @@ $projectRoot = Split-Path -Parent $scriptDir
 
 Import-Module (Join-Path $projectRoot "cameraunlock-core\powershell\DevDeploy.psm1") -Force
 Import-Module (Join-Path $projectRoot "cameraunlock-core\powershell\ModDeployment.psm1") -Force
-$config = Get-GameConfig -GameId 'bioshock-remastered'
 $result = Invoke-DevDeployShim `
     -GameId 'bioshock-remastered' `
     -GameDisplayName 'Bioshock Remastered' `
@@ -30,7 +29,6 @@ $result = Invoke-DevDeployShim `
     -ProjectName 'BioshockRemasteredHeadTracking' `
     -ModDllName 'BioshockRemasteredHeadTracking.dll' `
     -Configuration $Configuration `
-    -GameExeRelpath $config.Executable `
     -ExtraDlls @() `
     -GivenPath $GivenPath
 
