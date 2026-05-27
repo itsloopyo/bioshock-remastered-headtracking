@@ -63,8 +63,13 @@ $current = Get-CargoVersion
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
     Write-Host "Current version: $current" -ForegroundColor Yellow
-    Write-Host 'Usage: pixi run release <major|minor|patch|X.Y.Z>'
+    Write-Host 'Usage: pixi run release <major|minor|patch|nightly|X.Y.Z>'
     exit 0
+}
+
+if ($Version -eq 'nightly') {
+    & (Join-Path $scriptDir 'release-nightly.ps1')
+    exit $LASTEXITCODE
 }
 
 try {
