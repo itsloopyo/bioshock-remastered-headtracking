@@ -29,5 +29,7 @@ release = "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
 update-deps = "powershell -NoProfile -Command \"Write-Host 'No vendored dependencies to update (shim-only mod).'\""
 detect-game = "powershell -ExecutionPolicy Bypass -File scripts/detect-game.ps1"
 uninstall = "cmd /c scripts\\uninstall.cmd"
-vanilla = "powershell -ExecutionPolicy Bypass -File scripts/vanilla.ps1"
+# Shim uninstall already restores .backup originals and removes the state
+# file, so "vanilla" is just a non-interactive uninstall.
+vanilla = "cmd /c scripts\\uninstall.cmd /y"
 clean-all = "cargo clean; powershell -Command \"Remove-Item -Recurse -Force *.log -ErrorAction SilentlyContinue\""
