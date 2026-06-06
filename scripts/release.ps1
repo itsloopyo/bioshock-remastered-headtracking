@@ -104,6 +104,18 @@ Write-Host ''
 Write-Host "Updating Cargo.toml to $Version..." -ForegroundColor Cyan
 Set-CargoVersion -NewVersion $Version
 
+# Keep install.cmd's MOD_VERSION in lockstep - it's what the installer
+# writes into the user's .headtracking-state.json. ReadAllText/WriteAllText
+# preserve the file's CRLF line endings.
+$installCmdPath = Join-Path $projectDir 'scripts\install.cmd'
+$installRaw = [System.IO.File]::ReadAllText($installCmdPath)
+if ($installRaw -notmatch 'set "MOD_VERSION=[^"]+"') {
+    throw "MOD_VERSION line not found in $installCmdPath"
+}
+$installRaw = [regex]::Replace($installRaw, 'set "MOD_VERSION=[^"]+"', "set `"MOD_VERSION=$Version`"")
+[System.IO.File]::WriteAllText($installCmdPath, $installRaw)
+Write-Host "Updating scripts/install.cmd MOD_VERSION to $Version..." -ForegroundColor Cyan
+
 # Step 2 - build
 Write-Host 'Building release (i686-pc-windows-msvc)...' -ForegroundColor Cyan
 Push-Location $projectDir
@@ -131,7 +143,7 @@ if (-not $hasTags) {
 
 # Step 4 - commit specific files only (avoid git add -A sweeping in build artifacts)
 Write-Host 'Committing version + changelog...' -ForegroundColor Cyan
-git add $cargoPath $changelogPath
+git add $cargoPath $changelogPath $installCmdPath
 # Skip commit if Cargo.toml + CHANGELOG.md are already at this version
 # (re-running release for the same version, e.g. after deleting a
 # tag / release on GitHub to republish). The tag still gets recreated
