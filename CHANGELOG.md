@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.5] - 2026-06-07
+
+### Fixed
+
+- harden release.ps1 - changelog gate before version bump, add -Force
+
 ## [0.3.3] - 2026-06-07
 
 ### Added
