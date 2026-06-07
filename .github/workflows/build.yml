@@ -33,8 +33,14 @@ jobs:
           toolchain: stable-x86_64-pc-windows-msvc
           targets: i686-pc-windows-msvc
 
+      # run-install: false - this workspace has zero conda dependencies (pixi is
+      # a task runner only; the Rust toolchain comes from rust-toolchain above).
+      # The action's post-install `pixi list` errors on an empty environment in
+      # pixi 0.70+. `pixi run package` resolves the env lazily anyway.
       - name: Setup pixi
         uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          run-install: false
 
       # Build + package through the SAME command a developer runs locally. All
       # build logic lives in the pixi task chain (build-release -> package);
