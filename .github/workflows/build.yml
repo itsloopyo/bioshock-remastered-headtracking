@@ -16,94 +16,58 @@ on:
 
 jobs:
   build:
+    name: Build and Validate
     runs-on: windows-latest
+    if: ${{ !startsWith(github.event.head_commit.message, 'Release v') }}
+
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v6
         with:
           submodules: recursive
 
+      # Rust toolchain required by the pixi `package` task (cargo build i686).
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable-x86_64-pc-windows-msvc
-          components: clippy, rustfmt
+          targets: i686-pc-windows-msvc
 
-      - name: Install Pixi
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+
+      # Build + package through the SAME command a developer runs locally. All
+      # build logic lives in the pixi task chain (build-release -> package);
+      # the workflow owns none, so local and CI can't drift.
+      - name: Build and package
         shell: pwsh
-        # We use pixi only as a task runner (no conda dependencies in
-        # pixi.toml). prefix-dev/setup-pixi runs `pixi list --locked`
-        # post-install as a smoke test and treats an empty environment
-        # as a failure, so we install the binary directly instead.
-        # Pin a specific version so transient GitHub-releases blips on
-        # the "latest" alias don't break CI - bump as needed.
-        env:
-          PIXI_VERSION: v0.67.0
-        run: |
-          iwr -useb https://pixi.sh/install.ps1 | iex
-          echo "$env:USERPROFILE\.pixi\bin" >> $env:GITHUB_PATH
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Check formatting
-        run: pixi run fmt
-
-      - name: Run linter
-        run: pixi run lint
-
-      - name: Run tests
-        run: pixi run test
-
-      - name: Build Debug
-        run: pixi run build
-
-      - name: Build Release
-        run: pixi run build-release
-
-      - name: Verify build outputs
-        shell: pwsh
-        run: |
-          # Cargo emits to target/<triple>/<profile>/ when --target is
-          # passed, which the pixi build / build-release tasks do.
-          $debugDll = "target/i686-pc-windows-msvc/debug/bioshock_headtrack.dll"
-          $releaseDll = "target/i686-pc-windows-msvc/release/bioshock_headtrack.dll"
-
-          Write-Host "Checking build outputs..." -ForegroundColor Cyan
-
-          if (Test-Path $debugDll) {
-              $size = [math]::Round((Get-Item $debugDll).Length / 1024, 2)
-              Write-Host "Debug DLL: $size KB" -ForegroundColor Green
-          } else {
-              Write-Host "Debug DLL not found!" -ForegroundColor Red
-              exit 1
-          }
-
-          if (Test-Path $releaseDll) {
-              $size = [math]::Round((Get-Item $releaseDll).Length / 1024, 2)
-              Write-Host "Release DLL: $size KB" -ForegroundColor Green
-          } else {
-              Write-Host "Release DLL not found!" -ForegroundColor Red
-              exit 1
-          }
-
-          Write-Host "Build verification complete" -ForegroundColor Green
-
-      - name: Package installer
         run: pixi run package
+
+      # Unzip the installer so upload-artifact doesn't nest a zip in its zip.
+      - name: Stage installer contents for artifact upload
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem release/*-installer.zip -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $zip) {
+            Write-Host "::error::No installer ZIP was produced by 'pixi run package'"
+            exit 1
+          }
+          $dest = "release/artifact-contents"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Expand-Archive -Path $zip.FullName -DestinationPath $dest -Force
+          Write-Host "Staged $($zip.Name)" -ForegroundColor Green
+
+      - name: Compute artifact name from ref
+        id: artifact
+        shell: pwsh
+        run: |
+          $branch = "${{ github.ref_name }}" -replace '[^A-Za-z0-9._-]', '-'
+          echo "name=BioshockRemasteredHeadTracking-$branch" >> $env:GITHUB_OUTPUT
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v7
         with:
-          name: BioshockRemasteredHeadTracking-installer
-          path: release/*-installer.zip
+          name: ${{ steps.artifact.outputs.name }}
+          path: release/artifact-contents/
           retention-days: 14
           if-no-files-found: error

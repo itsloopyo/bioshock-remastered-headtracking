@@ -68,6 +68,7 @@ Two equivalent binding sets - use whichever your keyboard has:
 | Recenter            | `Home`      | `Ctrl+Shift+T`  |
 | Toggle tracking     | `End`       | `Ctrl+Shift+Y`  |
 | Cycle tracking mode | `Page Up`   | `Ctrl+Shift+G`  |
+| Toggle yaw mode     | `Page Down` | `Ctrl+Shift+H`  |
 
 `Page Up` / `Ctrl+Shift+G` cycles tracking mode:
 
@@ -81,17 +82,30 @@ the keyboard. `Ctrl+Shift+<letter>` is universally avoided by games,
 so the chord set works whether or not your keyboard has a nav
 cluster.
 
-## Configuration (non-default FOV)
+## Configuration
+
+The mod writes a self-documenting `bioshock_headtrack.ini` to
+`BioShock Remastered/Build/Final/` on first launch.
+
+```ini
+[General]
+; Yaw mode: true = horizon-locked yaw (default), false = camera-local
+WorldSpaceYaw=true
+
+[Hotkeys]
+; Page Down - toggle world/local yaw
+YawModeKey=0x22
+```
+
+### Non-default FOV
 
 If you've changed the FOV slider in BSR's options away from 100° (the
 stock value), the head-tracked reticle may drift away from the actual
 aim point - the mod can't auto-detect the slider value. Tell it your
 FOV manually:
 
-1. A self-documenting `bioshock_headtrack.ini` is written to
-   `BioShock Remastered/Build/Final/` on first launch (next to the
-   DLL).
-2. Uncomment and set:
+1. Open `bioshock_headtrack.ini`.
+2. Uncomment and set the overlay FOV:
 
    ```ini
    [overlay]
@@ -118,6 +132,11 @@ FOV manually:
 **Reticle drifts left/right as you yaw your head.**
 - You're likely running a non-stock FOV. Set `[overlay] fov_h` in
   `bioshock_headtrack.ini` (see Configuration).
+
+**Yaw feels wrong when looking up or down at extreme angles.**
+- Try toggling between world-locked and camera-local yaw with
+  `Page Down`. World-locked (default) is horizon-stable; camera-local
+  follows the camera's current up-axis.
 
 **Wrong rotation / jitter.**
 - Increase smoothing in your tracking source.

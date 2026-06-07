@@ -91,8 +91,9 @@ New-Item -ItemType Directory -Path $launcherProfileDir -Force | Out-Null
 Copy-Item -Path $builtDll -Destination (Join-Path $launcherProfileDir 'xinput1_3.dll') -Force
 
 # Stamp launcher-manifest.json with the real release version and drop it
-# at the installer ZIP root. The launcher reads this to choose the staging
-# + launch path (delivery_mode: profile -> session-isolated copy-in/out).
+# at the installer ZIP root. The launcher reads this (delivery_mode:
+# manifest) to natively deploy plugins/xinput1_3.dll per the files[] block.
+# install.cmd / uninstall.cmd still ship for users installing by hand.
 $manifestSource = Join-Path $projectRoot 'launcher-manifest.json'
 if (-not (Test-Path $manifestSource)) {
     throw "launcher-manifest.json not found at repo root ($manifestSource)"
