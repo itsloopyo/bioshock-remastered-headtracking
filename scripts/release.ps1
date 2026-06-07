@@ -22,7 +22,10 @@
 #>
 param(
     [Parameter(Position = 0)]
-    [string]$Version = ''
+    [string]$Version = '',
+    # Ship a release even when there are no user-facing commits since the
+    # last tag (writes a maintenance changelog entry instead of aborting).
+    [switch]$Force
 )
 
 Set-StrictMode -Version Latest
@@ -31,6 +34,7 @@ $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectDir = Split-Path -Parent $scriptDir
 $cargoPath = Join-Path $projectDir 'Cargo.toml'
+$cargoLockPath = Join-Path $projectDir 'Cargo.lock'
 $changelogPath = Join-Path $projectDir 'CHANGELOG.md'
 
 Import-Module (Join-Path $projectDir 'cameraunlock-core\powershell\ReleaseWorkflow.psm1') -Force
@@ -53,6 +57,22 @@ function Set-CargoVersion {
     $rx = [regex]::new('(?m)^(version\s*=\s*)"[^"]+"')
     $content = $rx.Replace($content, "`${1}`"$NewVersion`"", 1)
     Set-Content -Path $cargoPath -Value $content -NoNewline
+}
+
+# Mirrors New-ChangelogFromCommits' insertion so a -Force maintenance entry
+# lands in the same place with the same shape.
+function Add-MaintenanceChangelogEntry {
+    param([string]$Path, [string]$NewVersion)
+    $date = Get-Date -Format 'yyyy-MM-dd'
+    $entry = "## [$NewVersion] - $date`n`n### Changed`n`n- Maintenance release (no user-facing changes).`n`n"
+    $changelog = Get-Content $Path -Raw
+    if ($changelog -match '(?s)(# Changelog.*?)(## \[)') {
+        $changelog = $changelog -replace '(?s)(# Changelog.*?\n\n)', "`$1$entry"
+    } else {
+        $changelog = $changelog -replace '(?s)(# Changelog.*?\n)', "`$1$entry"
+    }
+    $changelog = $changelog.TrimEnd() + "`n"
+    Set-Content $Path $changelog -NoNewline
 }
 
 Write-Host ''
@@ -100,7 +120,34 @@ Write-Host "Current version: $current" -ForegroundColor Gray
 Write-Host "New version:     $Version" -ForegroundColor Green
 Write-Host ''
 
-# Step 1 - bump version
+# Step 1 - changelog (the gate that can fail). Generate it BEFORE mutating
+# any version files so an abort here leaves the working tree clean instead
+# of stranding a half-applied version bump with no tag.
+Write-Host 'Generating CHANGELOG from commits...' -ForegroundColor Cyan
+$hasTags = git tag -l 2>$null
+if (-not $hasTags) {
+    $date = Get-Date -Format 'yyyy-MM-dd'
+    Set-Content $changelogPath "# Changelog`n`n## [$Version] - $date`n`nFirst release.`n"
+} else {
+    try {
+        $changelogArgs = @{
+            ChangelogPath = $changelogPath
+            Version       = $Version
+            ArtifactPaths = @('src/', 'cameraunlock-core', 'scripts/')
+        }
+        New-ChangelogFromCommits @changelogArgs
+    } catch {
+        if (-not $Force) {
+            Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host 'No user-facing changes to release. Re-run with -Force for a maintenance release.' -ForegroundColor Yellow
+            exit 1
+        }
+        Write-Host 'No user-facing commits since last tag - writing maintenance entry (-Force).' -ForegroundColor Yellow
+        Add-MaintenanceChangelogEntry -Path $changelogPath -NewVersion $Version
+    }
+}
+
+# Step 2 - bump version in Cargo.toml + install.cmd
 Write-Host "Updating Cargo.toml to $Version..." -ForegroundColor Cyan
 Set-CargoVersion -NewVersion $Version
 
@@ -116,7 +163,7 @@ $installRaw = [regex]::Replace($installRaw, 'set "MOD_VERSION=[^"]+"', "set `"MO
 [System.IO.File]::WriteAllText($installCmdPath, $installRaw)
 Write-Host "Updating scripts/install.cmd MOD_VERSION to $Version..." -ForegroundColor Cyan
 
-# Step 2 - build
+# Step 3 - build (refreshes Cargo.lock's version entry)
 Write-Host 'Building release (i686-pc-windows-msvc)...' -ForegroundColor Cyan
 Push-Location $projectDir
 try {
@@ -126,28 +173,12 @@ try {
     Pop-Location
 }
 
-# Step 3 - changelog
-Write-Host 'Generating CHANGELOG from commits...' -ForegroundColor Cyan
-$hasTags = git tag -l 2>$null
-if (-not $hasTags) {
-    $date = Get-Date -Format 'yyyy-MM-dd'
-    Set-Content $changelogPath "# Changelog`n`n## [$Version] - $date`n`nFirst release.`n"
-} else {
-    $args = @{
-        ChangelogPath = $changelogPath
-        Version       = $Version
-        ArtifactPaths = @('src/', 'cameraunlock-core', 'scripts/')
-    }
-    New-ChangelogFromCommits @args
-}
-
 # Step 4 - commit specific files only (avoid git add -A sweeping in build artifacts)
 Write-Host 'Committing version + changelog...' -ForegroundColor Cyan
-git add $cargoPath $changelogPath $installCmdPath
-# Skip commit if Cargo.toml + CHANGELOG.md are already at this version
-# (re-running release for the same version, e.g. after deleting a
-# tag / release on GitHub to republish). The tag still gets recreated
-# below at the current HEAD.
+git add $cargoPath $cargoLockPath $changelogPath $installCmdPath
+# Skip commit if everything is already at this version (re-running release
+# for the same version, e.g. after deleting a tag / release on GitHub to
+# republish). The tag still gets recreated below at the current HEAD.
 git diff --cached --quiet
 if ($LASTEXITCODE -eq 0) {
     Write-Host 'No version/changelog changes - tagging existing HEAD.' -ForegroundColor Yellow
