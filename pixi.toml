@@ -1,6 +1,6 @@
 [workspace]
 name = "bioshock-head-tracking"
-version = "0.1.0"
+version = "0.3.2"
 description = "Head tracking mod for BioShock Remastered using OpenTrack"
 channels = ["conda-forge"]
 platforms = ["win-64"]

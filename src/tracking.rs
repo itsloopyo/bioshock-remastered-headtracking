@@ -149,6 +149,15 @@ pub struct TrackingState {
     /// Debounce timer for the tracking-mode cycle hotkey.
     pub last_cycle_mode_time: Instant,
 
+    /// Runtime yaw mode. True means horizon-locked world-space yaw.
+    pub world_space_yaw: bool,
+
+    /// Debounce timer for the yaw-mode toggle hotkey.
+    pub last_yaw_mode_time: Instant,
+
+    /// Previous pressed state for the yaw-mode binding.
+    pub yaw_mode_was_down: bool,
+
     /// Signal for threads to shutdown
     pub shutdown_requested: bool,
 }
@@ -204,6 +213,8 @@ pub static ATOMIC_ENABLED: AtomicBool = AtomicBool::new(true);
 /// Starts true so tracking works immediately (state detector also defaults to Gameplay)
 pub static ATOMIC_GAMEPLAY_ACTIVE: AtomicBool = AtomicBool::new(true);
 
+pub static ATOMIC_WORLD_SPACE_YAW: AtomicBool = AtomicBool::new(true);
+
 impl Default for TrackingState {
     fn default() -> Self {
         let now = Instant::now();
@@ -220,6 +231,9 @@ impl Default for TrackingState {
             last_toggle_time: now,
             last_recenter_time: now,
             last_cycle_mode_time: now,
+            world_space_yaw: ATOMIC_WORLD_SPACE_YAW.load(Ordering::Acquire),
+            last_yaw_mode_time: now - std::time::Duration::from_millis(crate::hotkeys::DEBOUNCE_MS),
+            yaw_mode_was_down: false,
             shutdown_requested: false,
         }
     }
@@ -296,6 +310,28 @@ impl TrackingState {
         };
         log::info!("Tracking mode: {label}");
     }
+
+    pub fn toggle_yaw_mode(&mut self) {
+        self.world_space_yaw = !self.world_space_yaw;
+        ATOMIC_WORLD_SPACE_YAW.store(self.world_space_yaw, Ordering::Release);
+        log::info!(
+            "Yaw mode: {}",
+            if self.world_space_yaw {
+                "world-space"
+            } else {
+                "camera-local"
+            }
+        );
+    }
+}
+
+pub fn set_world_space_yaw_initial(enabled: bool) {
+    ATOMIC_WORLD_SPACE_YAW.store(enabled, Ordering::Release);
+}
+
+#[inline(always)]
+pub fn is_world_space_yaw_atomic() -> bool {
+    ATOMIC_WORLD_SPACE_YAW.load(Ordering::Acquire)
 }
 
 /// Get recentered rotation values using lock-free atomics

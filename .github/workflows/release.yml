@@ -1,4 +1,5 @@
 name: Release
+run-name: "Release ${{ github.ref_name }}"
 
 on:
   push:
@@ -11,10 +12,12 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v6
         with:
+          fetch-depth: 0
           submodules: recursive
 
       - name: Validate tag format
@@ -58,44 +61,19 @@ jobs:
           }
           Write-Host "CHANGELOG.md has entry for $version" -ForegroundColor Green
 
+      # Rust toolchain required by the pixi `package` task (cargo build i686).
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable-x86_64-pc-windows-msvc
           targets: i686-pc-windows-msvc
 
-      - name: Install Pixi
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+
+      # Same command as build.yml and developers run - no build logic in YAML.
+      - name: Build and package
         shell: pwsh
-        # We use pixi only as a task runner (no conda dependencies in
-        # pixi.toml). prefix-dev/setup-pixi runs `pixi list --locked`
-        # post-install as a smoke test and treats an empty environment
-        # as a failure, so we install the binary directly instead.
-        # Pin a specific version so transient GitHub-releases blips on
-        # the "latest" alias don't break CI - bump as needed.
-        env:
-          PIXI_VERSION: v0.67.0
-        run: |
-          iwr -useb https://pixi.sh/install.ps1 | iex
-          echo "$env:USERPROFILE\.pixi\bin" >> $env:GITHUB_PATH
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Run release validation
-        run: pixi run validate-release
-
-      - name: Build release
-        run: pixi run build-release
-
-      - name: Create package
         run: pixi run package
 
       - name: Extract changelog section

@@ -15,7 +15,7 @@
 //! back to reading `DefaultFOV` from the PlayerController (which is
 //! correct for users who haven't changed the in-game FOV slider).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 /// Accepted horizontal FOV range for the INI override. Anything outside
 /// this is rejected (logged then ignored). 40° matches the lower bound
@@ -29,6 +29,7 @@ const FOV_H_MAX_DEG: f32 = 150.0;
 /// the field at its sentinel (false).
 static FOV_H_DEG_BITS: AtomicU32 = AtomicU32::new(0);
 static FOV_H_SET: AtomicBool = AtomicBool::new(false);
+static YAW_MODE_KEY: AtomicI32 = AtomicI32::new(0x22);
 
 /// Returns the user's INI-configured horizontal FOV in degrees, or
 /// `None` if no override was set.
@@ -38,6 +39,10 @@ pub fn fov_h_override() -> Option<f32> {
     } else {
         None
     }
+}
+
+pub fn yaw_mode_key() -> i32 {
+    YAW_MODE_KEY.load(Ordering::Acquire)
 }
 
 /// Default INI written on first launch when no config file exists.
@@ -55,6 +60,14 @@ const DEFAULT_INI: &str = "\
 
 [overlay]
 ; fov_h = 100
+
+[General]
+; Yaw mode: true = horizon-locked yaw (default), false = camera-local
+WorldSpaceYaw=true
+
+[Hotkeys]
+; Page Down - toggle world/local yaw
+YawModeKey=0x22
 ";
 
 /// Read `bioshock_headtrack.ini` from the working directory (where the
@@ -70,6 +83,7 @@ pub fn load() {
                 Ok(()) => log::info!("config: wrote default {} (no overrides active)", path),
                 Err(e) => log::warn!("config: no {} found and couldn't create one: {}", path, e),
             }
+            log_yaw_mode_startup();
             return;
         }
     };
@@ -98,8 +112,8 @@ pub fn load() {
         };
         let key = key.trim().to_ascii_lowercase();
         let value = value.trim();
-        if section == "overlay" && key == "fov_h" {
-            match value.parse::<f32>() {
+        match (section.as_str(), key.as_str()) {
+            ("overlay", "fov_h") => match value.parse::<f32>() {
                 Ok(v) if v.is_finite() && (FOV_H_MIN_DEG..=FOV_H_MAX_DEG).contains(&v) => {
                     FOV_H_DEG_BITS.store(v.to_bits(), Ordering::Relaxed);
                     FOV_H_SET.store(true, Ordering::Release);
@@ -114,11 +128,68 @@ pub fn load() {
                         FOV_H_MAX_DEG
                     );
                 }
-            }
+            },
+            ("general", "worldspaceyaw") => match parse_bool(value) {
+                Some(v) => {
+                    crate::tracking::set_world_space_yaw_initial(v);
+                    log::info!("config: [General] WorldSpaceYaw = {}", v);
+                    applied += 1;
+                }
+                None => log::warn!(
+                    "config: [General] WorldSpaceYaw = {:?} is not a boolean, using default",
+                    value
+                ),
+            },
+            ("hotkeys", "yawmodekey") => match parse_vk(value) {
+                Some(v) => {
+                    YAW_MODE_KEY.store(v, Ordering::Release);
+                    log::info!("config: [Hotkeys] YawModeKey = 0x{:02X}", v);
+                    applied += 1;
+                }
+                None => log::warn!(
+                    "config: [Hotkeys] YawModeKey = {:?} is not a valid VK code, using default",
+                    value
+                ),
+            },
+            _ => {}
         }
     }
 
     if applied == 0 {
         log::info!("config: {} present but no recognised keys applied", path);
     }
+    log_yaw_mode_startup();
+}
+
+fn log_yaw_mode_startup() {
+    log::info!(
+        "config: yaw mode startup = {}, YawModeKey = 0x{:02X}",
+        if crate::tracking::is_world_space_yaw_atomic() {
+            "world-space"
+        } else {
+            "camera-local"
+        },
+        yaw_mode_key()
+    );
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_vk(value: &str) -> Option<i32> {
+    let value = value.trim();
+    let parsed = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        i32::from_str_radix(hex, 16).ok()?
+    } else {
+        value.parse::<i32>().ok()?
+    };
+    (1..=0xFE).contains(&parsed).then_some(parsed)
 }

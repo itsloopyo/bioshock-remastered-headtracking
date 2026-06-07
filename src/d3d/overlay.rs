@@ -163,6 +163,143 @@ struct OverlayCb {
     color: [f32; 4],
 }
 
+#[derive(Clone, Copy)]
+struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Basis {
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+}
+
+fn basis_from_degrees(pitch_deg: f64, yaw_deg: f64, roll_deg: f64) -> Basis {
+    let pitch = pitch_deg.to_radians();
+    let yaw = yaw_deg.to_radians();
+    let roll = roll_deg.to_radians();
+
+    let cp = pitch.cos();
+    let sp = pitch.sin();
+    let cy = yaw.cos();
+    let sy = yaw.sin();
+    let cr = roll.cos();
+    let sr = roll.sin();
+
+    let forward = Vec3 {
+        x: cp * cy,
+        y: cp * sy,
+        z: sp,
+    };
+    let right0 = Vec3 {
+        x: -sy,
+        y: cy,
+        z: 0.0,
+    };
+    let up0 = Vec3 {
+        x: -sp * cy,
+        y: -sp * sy,
+        z: cp,
+    };
+    Basis {
+        forward,
+        right: add(scale(right0, cr), scale(up0, -sr)),
+        up: add(scale(right0, sr), scale(up0, cr)),
+    }
+}
+
+fn rendered_basis(
+    clean: Basis,
+    yaw_deg: f64,
+    pitch_deg: f64,
+    roll_deg: f64,
+    world_space_yaw: bool,
+) -> Basis {
+    if world_space_yaw {
+        let yawed = rotate_world_z(clean, yaw_deg.to_radians());
+        let pitch_roll = basis_from_degrees(pitch_deg, 0.0, -roll_deg);
+        mul_basis(yawed, pitch_roll)
+    } else {
+        let head = basis_from_degrees(pitch_deg, yaw_deg, -roll_deg);
+        mul_basis(clean, head)
+    }
+}
+
+fn rotate_world_z(basis: Basis, angle: f64) -> Basis {
+    Basis {
+        forward: rotate_vec_world_z(basis.forward, angle),
+        right: rotate_vec_world_z(basis.right, angle),
+        up: rotate_vec_world_z(basis.up, angle),
+    }
+}
+
+fn rotate_vec_world_z(v: Vec3, angle: f64) -> Vec3 {
+    let c = angle.cos();
+    let s = angle.sin();
+    Vec3 {
+        x: v.x * c - v.y * s,
+        y: v.x * s + v.y * c,
+        z: v.z,
+    }
+}
+
+fn mul_basis(a: Basis, b: Basis) -> Basis {
+    Basis {
+        forward: transform_vec(a, b.forward),
+        right: transform_vec(a, b.right),
+        up: transform_vec(a, b.up),
+    }
+}
+
+fn transform_vec(basis: Basis, v: Vec3) -> Vec3 {
+    add(
+        add(scale(basis.forward, v.x), scale(basis.right, v.y)),
+        scale(basis.up, v.z),
+    )
+}
+
+fn scale(v: Vec3, s: f64) -> Vec3 {
+    Vec3 {
+        x: v.x * s,
+        y: v.y * s,
+        z: v.z * s,
+    }
+}
+
+fn add(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3 {
+        x: a.x + b.x,
+        y: a.y + b.y,
+        z: a.z + b.z,
+    }
+}
+
+fn sub(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3 {
+        x: a.x - b.x,
+        y: a.y - b.y,
+        z: a.z - b.z,
+    }
+}
+
+fn dot(a: Vec3, b: Vec3) -> f64 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+fn position_offset_world(right: f64, up: f64, forward: f64, clean_yaw_deg: f64) -> Vec3 {
+    let yaw = clean_yaw_deg.to_radians();
+    let cos_y = yaw.cos();
+    let sin_y = yaw.sin();
+    Vec3 {
+        x: forward * cos_y - right * sin_y,
+        y: forward * sin_y + right * cos_y,
+        z: up,
+    }
+}
+
 fn compile_shader(src: &str, entry: &str, target: &str) -> Option<ID3DBlob> {
     let mut blob: Option<ID3DBlob> = None;
     let mut err_blob: Option<ID3DBlob> = None;
@@ -418,79 +555,28 @@ pub fn draw(swap_chain_ptr: *mut c_void, yaw_deg: f64, pitch_deg: f64, roll_deg:
             None => return,
         };
 
-        // Per-axis tangent projection. The earlier spherical-decomp
-        // formula (ported from subnautica) caused a "U-on-yaw" where
-        // the reticle dipped vertically as the user yawed left/right
-        // - the cross-coupling factors (`cos(yaw)` on `ay`/`az`)
-        // assume an intrinsic-YPR rotation chain, but BioShock's
-        // FRotator → view matrix doesn't compose the same way, so
-        // the math overcorrects and demands a wildly inflated `fov_h`
-        // (~117° vs the engine's actual ~96°) to cancel the resulting
-        // horizontal drift.
-        //
-        // The per-axis form has no yaw↔pitch coupling at all:
-        //   ndc_x depends only on yaw and fov_h
-        //   ndc_y depends only on pitch and fov_v
-        // It loses pure roll-around-view-axis correction, so we add a
-        // separate screen-space roll rotation afterwards. The slight
-        // FOV/aspect distortion this introduces (per the global
-        // CLAUDE.md note) is dwarfed by the U-on-yaw error we'd see
-        // otherwise.
         let (fov_h_deg, fov_v_deg) = current_fov_deg();
         let fov_h = (fov_h_deg as f64).to_radians();
         let fov_v = (fov_v_deg as f64).to_radians();
         let aspect = 16.0_f64 / 9.0;
 
-        let yaw_rad = yaw_deg.to_radians();
-        let pitch_rad = pitch_deg.to_radians();
-
-        // Full-spherical projection. We need the gun-aim direction
-        // (= clean camera forward in world) expressed in the
-        // head-rotated camera's local frame, then perspective-
-        // divided. Treating the clean rotation as zero (as the older
-        // per-axis form did) makes the reticle slide flat horizontally
-        // when you yaw - but the *real* aim point traces a U/arc on
-        // screen because of spherical geometry whenever the mouse
-        // is pitched off-level. That's the "MASSIVE semicircle" bug.
-        //
-        // Setup:
-        //   P_c, Y_c = clean (mouse-driven) pitch/yaw, in radians.
-        //   P_h, Y_h = head-tracking deltas, in radians.
-        //   P_t = P_c + P_h, Y_t = Y_c + Y_h (component sums match
-        //         how engine_hook stitches them into the FRotator).
-        //
-        // Building rendered & clean orthonormal bases in UE local
-        // axes (X = forward, Y = right, Z = up) and projecting
-        // clean's forward into rendered's basis gives:
-        //   aim.fwd   =  cos(P_t)cos(P_c)cos(Y_h) + sin(P_t)sin(P_c)
-        //   aim.right = -cos(P_c) sin(Y_h)
-        //   aim.up    = -sin(P_t)cos(P_c)cos(Y_h) + cos(P_t)sin(P_c)
-        // (Y_h = Y_t - Y_c falls out by sum-of-angles.)
-        //
-        // Yaw sign is `+Y_h` (matches how engine_hook adds the head
-        // delta into the FRotator); flipping to `-Y_h` inverted the
-        // reticle's horizontal direction in the spherical-projection
-        // form, even though the per-axis form needed the negative
-        // sign. The two formulas differ in how they parametrise the
-        // rotation, so the empirical sign is opposite.
-        let p_c = (crate::engine_hook::units_to_deg(
+        let clean_pitch = crate::engine_hook::units_to_deg(
             crate::engine_hook::CLEAN_PITCH_UNITS.load(Ordering::Relaxed),
-        ))
-        .to_radians();
-        let p_h = pitch_rad;
-        let p_t = p_c + p_h;
-        let y_h = yaw_rad;
-
-        let cos_pt = p_t.cos();
-        let sin_pt = p_t.sin();
-        let cos_pc = p_c.cos();
-        let sin_pc = p_c.sin();
-        let cos_yh = y_h.cos();
-        let sin_yh = y_h.sin();
-
-        let aim_fwd_dir = cos_pt * cos_pc * cos_yh + sin_pt * sin_pc;
-        let aim_right_dir = -cos_pc * sin_yh;
-        let aim_up_dir = -sin_pt * cos_pc * cos_yh + cos_pt * sin_pc;
+        );
+        let clean_yaw = crate::engine_hook::units_to_deg(
+            crate::engine_hook::CLEAN_YAW_UNITS.load(Ordering::Relaxed),
+        );
+        let clean_roll = crate::engine_hook::units_to_deg(
+            crate::engine_hook::CLEAN_ROLL_UNITS.load(Ordering::Relaxed),
+        );
+        let clean_basis = basis_from_degrees(clean_pitch, clean_yaw, clean_roll);
+        let rendered = rendered_basis(
+            clean_basis,
+            yaw_deg,
+            pitch_deg,
+            roll_deg,
+            crate::tracking::is_world_space_yaw_atomic(),
+        );
 
         // Parallax compensation for 6DOF position tracking.
         //
@@ -519,40 +605,17 @@ pub fn draw(swap_chain_ptr: *mut c_void, yaw_deg: f64, pitch_deg: f64, roll_deg:
         // best-fit constant.
         const K_AIM_DIST_CM: f64 = 500.0;
         let (head_right, head_up, head_fwd) = crate::tracking::applied_head_offset();
-        let aim_fwd = K_AIM_DIST_CM * aim_fwd_dir - head_fwd;
-        let aim_right = K_AIM_DIST_CM * aim_right_dir - head_right;
-        let aim_up = K_AIM_DIST_CM * aim_up_dir - head_up;
+        let head_world = position_offset_world(head_right, head_up, head_fwd, clean_yaw);
+        let aim_world = sub(scale(clean_basis.forward, K_AIM_DIST_CM), head_world);
+        let aim_fwd = dot(aim_world, rendered.forward);
+        let aim_right = dot(aim_world, rendered.right);
+        let aim_up = dot(aim_world, rendered.up);
 
-        let mut ndc_x = (aim_right / aim_fwd / (fov_h * 0.5).tan()) as f32;
-        let mut ndc_y = (aim_up / aim_fwd / (fov_v * 0.5).tan()) as f32;
+        let ndc_x = (aim_right / aim_fwd / (fov_h * 0.5).tan()) as f32;
+        let ndc_y = (aim_up / aim_fwd / (fov_v * 0.5).tan()) as f32;
 
-        // Screen-space roll, applied AFTER the spherical projection.
-        // Re-derived from the UE2.5 basis-with-roll formulation:
-        // for a rendered roll R_t around the camera-forward axis,
-        // the rolled NDC position is the no-roll NDC rotated by
-        // **-R_t** in aspect-corrected screen space (NOT +R_t - the
         // `right_with_roll` basis vector is `cos R · right − sin R · up`
-        // in UE convention, which flips the cross-term sign).
-        //
-        // engine_hook writes `-OpenTrack_roll` to the FRotator, so
         // R_t = -roll_deg (with clean roll ≈ 0). Therefore the
-        // rotation angle to apply here = -R_t = +roll_deg. But the
-        // cross-term sign flip from the basis derivation means we
-        // negate that, ending up at -roll_deg. ROLL_SIGN absorbs
-        // that net negation; flip to +1.0 if the roll direction
-        // still ends up wrong in-game.
-        const ROLL_SIGN: f32 = -1.0;
-        let r = ROLL_SIGN * (roll_deg as f32) * std::f32::consts::PI / 180.0;
-        let cr = r.cos();
-        let sr = r.sin();
-        let aspect_f = aspect as f32;
-        let sx = ndc_x * aspect_f;
-        let sy = ndc_y;
-        let sx_r = sx * cr - sy * sr;
-        let sy_r = sx * sr + sy * cr;
-        ndc_x = sx_r / aspect_f;
-        ndc_y = sy_r;
-
         let quad_w_ndc = RETICLE_QUAD_NDC_W;
         let quad_h_ndc = quad_w_ndc * aspect as f32;
 

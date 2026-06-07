@@ -8,6 +8,7 @@
 //! | Recenter            | Home        | Ctrl+Shift+T   |
 //! | Toggle tracking     | End         | Ctrl+Shift+Y   |
 //! | Cycle tracking mode | Page Up     | Ctrl+Shift+G   |
+//! | Toggle yaw mode     | Page Down   | Ctrl+Shift+H   |
 //!
 //! The chord letters T/Y/G form a vertical 1x3 strip in the
 //! T/Y/U/G/H/J cluster on the keyboard - easy to recall.
@@ -36,6 +37,8 @@ const VK_CONTROL: i32 = 0x11;
 const VK_END: i32 = 0x23;
 const VK_HOME: i32 = 0x24;
 const VK_PAGE_UP: i32 = 0x21;
+const VK_PAGE_DOWN: i32 = 0x22;
+const VK_H: i32 = 0x48;
 const VK_G: i32 = 0x47;
 const VK_T: i32 = 0x54;
 const VK_Y: i32 = 0x59;
@@ -71,6 +74,27 @@ fn fired(nav_vk: i32, chord_letter_vk: i32, last: &mut Instant, debounce: Durati
     true
 }
 
+fn fired_edge(
+    nav_vk: i32,
+    chord_letter_vk: i32,
+    last: &mut Instant,
+    was_down: &mut bool,
+    debounce: Duration,
+) -> bool {
+    let down = binding_down(nav_vk, chord_letter_vk);
+    let pressed = down && !*was_down;
+    *was_down = down;
+    if !pressed {
+        return false;
+    }
+    let now = Instant::now();
+    if now.duration_since(*last) <= debounce {
+        return false;
+    }
+    *last = now;
+    true
+}
+
 fn tick(state: &mut TrackingState) {
     let debounce = Duration::from_millis(DEBOUNCE_MS);
 
@@ -82,6 +106,21 @@ fn tick(state: &mut TrackingState) {
     }
     if fired(VK_PAGE_UP, VK_G, &mut state.last_cycle_mode_time, debounce) {
         state.cycle_tracking_mode();
+    }
+    let configured_yaw_mode_key = crate::config::yaw_mode_key();
+    let yaw_mode_key = if configured_yaw_mode_key == 0 {
+        VK_PAGE_DOWN
+    } else {
+        configured_yaw_mode_key
+    };
+    if fired_edge(
+        yaw_mode_key,
+        VK_H,
+        &mut state.last_yaw_mode_time,
+        &mut state.yaw_mode_was_down,
+        debounce,
+    ) {
+        state.toggle_yaw_mode();
     }
 }
 
@@ -116,8 +155,11 @@ mod tests {
         assert_eq!(VK_HOME, 0x24);
         assert_eq!(VK_END, 0x23);
         assert_eq!(VK_PAGE_UP, 0x21);
+        assert_eq!(VK_PAGE_DOWN, 0x22);
+        assert_eq!(crate::config::yaw_mode_key(), 0x22);
         assert_eq!(VK_T, 0x54);
         assert_eq!(VK_Y, 0x59);
         assert_eq!(VK_G, 0x47);
+        assert_eq!(VK_H, 0x48);
     }
 }

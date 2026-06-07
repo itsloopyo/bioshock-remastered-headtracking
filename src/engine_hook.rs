@@ -33,10 +33,14 @@ use std::time::Instant;
 use once_cell::sync::OnceCell;
 
 use crate::hook_util::install_hook;
-use crate::tracking::{is_enabled_atomic, is_position_enabled_atomic, is_rotation_enabled_atomic};
+use crate::tracking::{
+    is_enabled_atomic, is_position_enabled_atomic, is_rotation_enabled_atomic,
+    is_world_space_yaw_atomic,
+};
 
 /// UE2.5 FRotator layout.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct FRotator {
     pitch: i32,
     yaw: i32,
@@ -51,6 +55,20 @@ struct FVector {
     x: f32,
     y: f32,
     z: f32,
+}
+
+#[derive(Clone, Copy)]
+struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Basis {
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
 }
 
 /// Asymmetric per-axis position limits, in centimetres. More forward
@@ -142,6 +160,163 @@ fn deg_to_units(deg: f64) -> i32 {
     (deg * UNITS_PER_DEGREE) as i32
 }
 
+fn rotator_to_basis(rot: &FRotator) -> Basis {
+    let pitch = units_to_deg(rot.pitch).to_radians();
+    let yaw = units_to_deg(rot.yaw).to_radians();
+    let roll = units_to_deg(rot.roll).to_radians();
+
+    let cp = pitch.cos();
+    let sp = pitch.sin();
+    let cy = yaw.cos();
+    let sy = yaw.sin();
+    let cr = roll.cos();
+    let sr = roll.sin();
+
+    let forward = Vec3 {
+        x: cp * cy,
+        y: cp * sy,
+        z: sp,
+    };
+    let right0 = Vec3 {
+        x: -sy,
+        y: cy,
+        z: 0.0,
+    };
+    let up0 = Vec3 {
+        x: -sp * cy,
+        y: -sp * sy,
+        z: cp,
+    };
+    Basis {
+        forward,
+        right: add(scale(right0, cr), scale(up0, -sr)),
+        up: add(scale(right0, sr), scale(up0, cr)),
+    }
+}
+
+fn basis_to_rotator(basis: Basis) -> FRotator {
+    let pitch = basis.forward.z.clamp(-1.0, 1.0).asin();
+    let yaw = basis.forward.y.atan2(basis.forward.x);
+    let cp = pitch.cos();
+    let (right0, up0) = if cp.abs() > 1e-6 {
+        (
+            Vec3 {
+                x: -yaw.sin(),
+                y: yaw.cos(),
+                z: 0.0,
+            },
+            Vec3 {
+                x: -pitch.sin() * yaw.cos(),
+                y: -pitch.sin() * yaw.sin(),
+                z: cp,
+            },
+        )
+    } else {
+        (
+            Vec3 {
+                x: basis.right.x,
+                y: basis.right.y,
+                z: 0.0,
+            },
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: cp.signum(),
+            },
+        )
+    };
+    let roll = (-dot(basis.right, up0)).atan2(dot(basis.right, right0));
+    FRotator {
+        pitch: deg_to_units(pitch.to_degrees()),
+        yaw: deg_to_units(yaw.to_degrees()),
+        roll: deg_to_units(roll.to_degrees()),
+    }
+}
+
+fn apply_world_space_yaw(
+    clean: &FRotator,
+    yaw_deg: f64,
+    pitch_deg: f64,
+    roll_deg: f64,
+) -> FRotator {
+    let clean_basis = rotator_to_basis(clean);
+    let yawed = rotate_world_z(clean_basis, yaw_deg.to_radians());
+    let pitch_roll = rotator_to_basis(&FRotator {
+        pitch: deg_to_units(pitch_deg),
+        yaw: 0,
+        roll: deg_to_units(-roll_deg),
+    });
+    basis_to_rotator(mul_basis(yawed, pitch_roll))
+}
+
+fn apply_camera_local_yaw(
+    clean: &FRotator,
+    yaw_deg: f64,
+    pitch_deg: f64,
+    roll_deg: f64,
+) -> FRotator {
+    let clean_basis = rotator_to_basis(clean);
+    let head = rotator_to_basis(&FRotator {
+        pitch: deg_to_units(pitch_deg),
+        yaw: deg_to_units(yaw_deg),
+        roll: deg_to_units(-roll_deg),
+    });
+    basis_to_rotator(mul_basis(clean_basis, head))
+}
+
+fn rotate_world_z(basis: Basis, angle: f64) -> Basis {
+    Basis {
+        forward: rotate_vec_world_z(basis.forward, angle),
+        right: rotate_vec_world_z(basis.right, angle),
+        up: rotate_vec_world_z(basis.up, angle),
+    }
+}
+
+fn rotate_vec_world_z(v: Vec3, angle: f64) -> Vec3 {
+    let c = angle.cos();
+    let s = angle.sin();
+    Vec3 {
+        x: v.x * c - v.y * s,
+        y: v.x * s + v.y * c,
+        z: v.z,
+    }
+}
+
+fn mul_basis(a: Basis, b: Basis) -> Basis {
+    Basis {
+        forward: transform_vec(a, b.forward),
+        right: transform_vec(a, b.right),
+        up: transform_vec(a, b.up),
+    }
+}
+
+fn transform_vec(basis: Basis, v: Vec3) -> Vec3 {
+    add(
+        add(scale(basis.forward, v.x), scale(basis.right, v.y)),
+        scale(basis.up, v.z),
+    )
+}
+
+fn scale(v: Vec3, s: f64) -> Vec3 {
+    Vec3 {
+        x: v.x * s,
+        y: v.y * s,
+        z: v.z * s,
+    }
+}
+
+fn add(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3 {
+        x: a.x + b.x,
+        y: a.y + b.y,
+        z: a.z + b.z,
+    }
+}
+
+fn dot(a: Vec3, b: Vec3) -> f64 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
 /// The detour. Calls original first, then mutates the out-FRotator
 /// (and the camera FVector when 6DOF position is enabled).
 unsafe extern "thiscall" fn event_player_calc_view_detour(
@@ -173,7 +348,7 @@ unsafe extern "thiscall" fn event_player_calc_view_detour(
 
     // Snapshot the CLEAN rotation BEFORE we add the head-tracking
     // delta. The overlay needs this for parallax-correct projection.
-    let clean = &*camera_rotation;
+    let clean = *camera_rotation;
     CLEAN_PITCH_UNITS.store(clean.pitch, Ordering::Relaxed);
     CLEAN_YAW_UNITS.store(clean.yaw, Ordering::Relaxed);
     CLEAN_ROLL_UNITS.store(clean.roll, Ordering::Relaxed);
@@ -196,9 +371,11 @@ unsafe extern "thiscall" fn event_player_calc_view_detour(
     // around the view axis, OpenTrack reports counter-clockwise positive.
     if is_rotation_enabled_atomic() {
         let rot = &mut *camera_rotation;
-        rot.pitch = rot.pitch.wrapping_add(deg_to_units(pitch_deg));
-        rot.yaw = rot.yaw.wrapping_add(deg_to_units(yaw_deg));
-        rot.roll = rot.roll.wrapping_add(deg_to_units(-roll_deg));
+        if is_world_space_yaw_atomic() {
+            *rot = apply_world_space_yaw(&clean, yaw_deg, pitch_deg, roll_deg);
+        } else {
+            *rot = apply_camera_local_yaw(&clean, yaw_deg, pitch_deg, roll_deg);
+        }
     }
 
     // 6DOF position. Apply the head's translational delta to the
@@ -260,5 +437,35 @@ pub fn install(target_addr: usize) -> Result<(), String> {
             &ORIGINAL,
             "eventPlayerCalcView",
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yaw_modes_diverge_at_steep_pitch() {
+        let clean = FRotator {
+            pitch: deg_to_units(-80.0),
+            yaw: 0,
+            roll: 0,
+        };
+
+        let world = apply_world_space_yaw(&clean, 30.0, 0.0, 0.0);
+        let local = apply_camera_local_yaw(&clean, 30.0, 0.0, 0.0);
+
+        let pitch_delta = (world.pitch - local.pitch).abs();
+        let roll_delta = (world.roll - local.roll).abs();
+        assert!(
+            pitch_delta > deg_to_units(5.0) || roll_delta > deg_to_units(5.0),
+            "expected yaw modes to diverge at steep pitch, world=({}, {}, {}), local=({}, {}, {})",
+            units_to_deg(world.pitch),
+            units_to_deg(world.yaw),
+            units_to_deg(world.roll),
+            units_to_deg(local.pitch),
+            units_to_deg(local.yaw),
+            units_to_deg(local.roll)
+        );
     }
 }
