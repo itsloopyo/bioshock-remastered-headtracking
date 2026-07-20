@@ -164,6 +164,12 @@ pixi run install-release # deploy locally to your Steam install
 changelog from commits, tags, and pushes - CI builds and uploads the
 release ZIPs.
 
+## Community & Support
+
+- Discord: [Loop's Head Tracking Hangout](https://discord.com/invite/dxyZdyFNT9) - setup help, bug reports, and new-release announcements
+- [Lopari](https://lopari.app) - free Windows launcher with one-click install and launch for the released head-tracking mods
+- [Headcam](https://headcam.app) - use your iPhone or Android phone as the head tracker
+
 ## License
 
 MIT - see [LICENSE](LICENSE).
