@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.6] - 2026-08-03
+
+### Added
+
+- recenter from Headcam trailer packets, drop non-finite tracking data
+
+### Fixed
+
+- show full control set in pixi install via shared -Controls
+
 ## [0.3.5] - 2026-06-07
 
 ### Fixed
