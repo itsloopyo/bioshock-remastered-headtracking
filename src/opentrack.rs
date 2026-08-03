@@ -20,9 +20,9 @@
 use std::io;
 use std::net::UdpSocket;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::tracking::{
     update_position_atomic, update_rotation_atomic, ATOMIC_SAMPLE_SEQ, GLOBAL_STATE,
@@ -33,6 +33,13 @@ pub const OPENTRACK_PORT: u16 = 4242;
 
 /// OpenTrack packet size: 6 doubles * 8 bytes = 48 bytes
 pub const PACKET_SIZE: usize = 48;
+
+const RECEIVE_BUFFER_SIZE: usize = 64;
+const TRAILER_SIZE: usize = 54;
+const TRAILER_MAGIC: &[u8; 4] = b"HCAM";
+const TRAILER_VERSION: u8 = 1;
+const RECENTER_GAP: Duration = Duration::from_millis(500);
+static RECENTER_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Socket read timeout in milliseconds (4ms allows ~250Hz polling)
 const READ_TIMEOUT_MS: u64 = 4;
@@ -85,6 +92,24 @@ impl OpenTrackData {
         }
     }
 
+    /// True only when every field is a finite number.
+    ///
+    /// The receiver binds `0.0.0.0`, so any host on the network (or a
+    /// glitching tracker) can deliver a datagram. A single non-finite value
+    /// would flow into the exponential smoother and pin its running value
+    /// at `NaN` permanently, so every later sample stays `NaN` until a
+    /// recenter or toggle resets the pipeline. Non-finite tracking data is
+    /// never legitimate, so we drop the packet at the boundary rather than
+    /// let it poison state.
+    pub fn is_finite(&self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.z.is_finite()
+            && self.yaw.is_finite()
+            && self.pitch.is_finite()
+            && self.roll.is_finite()
+    }
+
     /// Create a 48-byte packet from OpenTrackData
     ///
     /// Useful for testing - creates a packet in the OpenTrack format
@@ -103,6 +128,20 @@ impl OpenTrackData {
         buf[40..48].copy_from_slice(&self.roll.to_le_bytes());
         buf
     }
+}
+
+fn parse_recenter_counter(data: &[u8]) -> Option<u8> {
+    if data.len() < TRAILER_SIZE
+        || &data[48..52] != TRAILER_MAGIC
+        || data[52] < TRAILER_VERSION
+    {
+        return None;
+    }
+    Some(data[53])
+}
+
+pub fn try_consume_recenter_request() -> bool {
+    RECENTER_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
 /// Spawn the OpenTrack UDP receiver thread.
@@ -181,7 +220,9 @@ fn bind_with_retry() -> Option<UdpSocket> {
 }
 
 fn receive_loop(socket: UdpSocket) {
-    let mut buf = [0u8; PACKET_SIZE];
+    let mut buf = [0u8; RECEIVE_BUFFER_SIZE];
+    let mut last_recenter_counter = None;
+    let mut last_packet_at = None;
 
     loop {
         if GLOBAL_STATE.read().shutdown_requested {
@@ -190,8 +231,31 @@ fn receive_loop(socket: UdpSocket) {
         }
 
         match socket.recv(&mut buf) {
-            Ok(PACKET_SIZE) => {
-                let data = OpenTrackData::from_bytes(&buf);
+            Ok(size) if size >= PACKET_SIZE => {
+                let now = Instant::now();
+                if let Some(previous) = last_packet_at {
+                    if now.duration_since(previous) >= RECENTER_GAP {
+                        last_recenter_counter = None;
+                    }
+                }
+                last_packet_at = Some(now);
+
+                if let Some(counter) = parse_recenter_counter(&buf[..size]) {
+                    if last_recenter_counter != Some(counter) {
+                        RECENTER_REQUESTED.store(true, Ordering::Release);
+                    }
+                    last_recenter_counter = Some(counter);
+                }
+
+                let packet: &[u8; PACKET_SIZE] = buf[..PACKET_SIZE].try_into().unwrap();
+                let data = OpenTrackData::from_bytes(packet);
+
+                // Drop non-finite packets at the boundary: a single NaN/Inf
+                // would pin the smoother at NaN for the rest of the session.
+                if !data.is_finite() {
+                    log::warn!("Discarding OpenTrack packet with non-finite values");
+                    continue;
+                }
 
                 // Update rotation + position using lock-free atomics
                 // (optimized hot path).
@@ -368,6 +432,62 @@ mod tests {
     }
 
     #[test]
+    fn test_is_finite_accepts_normal_data() {
+        let data = OpenTrackData {
+            x: 1.0,
+            y: -2.0,
+            z: 3.0,
+            yaw: 45.0,
+            pitch: -30.0,
+            roll: 15.0,
+        };
+        assert!(data.is_finite());
+    }
+
+    #[test]
+    fn test_is_finite_rejects_nan_and_inf() {
+        // Each non-finite field, one at a time, must fail validation so a
+        // single bad packet can never reach the smoother.
+        let bad_values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        for &bad in &bad_values {
+            let base = OpenTrackData {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                yaw: 0.0,
+                pitch: 0.0,
+                roll: 0.0,
+            };
+            for field in 0..6 {
+                let mut d = base;
+                match field {
+                    0 => d.x = bad,
+                    1 => d.y = bad,
+                    2 => d.z = bad,
+                    3 => d.yaw = bad,
+                    4 => d.pitch = bad,
+                    _ => d.roll = bad,
+                }
+                assert!(
+                    !d.is_finite(),
+                    "field {} = {:?} should be rejected",
+                    field,
+                    bad
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_finite_on_parsed_nan_packet() {
+        // A NaN that arrives over the wire must be caught after parsing.
+        let mut buf = [0u8; PACKET_SIZE];
+        buf[24..32].copy_from_slice(&f64::NAN.to_le_bytes()); // yaw
+        let data = OpenTrackData::from_bytes(&buf);
+        assert!(!data.is_finite());
+    }
+
+    #[test]
     fn test_packet_size_constant() {
         // Verify PACKET_SIZE matches 6 * 8 bytes
         assert_eq!(PACKET_SIZE, 48);
@@ -422,5 +542,16 @@ mod tests {
         assert!(approx_eq(received.yaw, 42.5));
         assert!(approx_eq(received.pitch, -15.0));
         assert!(approx_eq(received.roll, 7.25));
+    }
+
+    #[test]
+    fn parses_headcam_recenter_trailer() {
+        let mut packet = [0u8; TRAILER_SIZE];
+        packet[48..52].copy_from_slice(TRAILER_MAGIC);
+        packet[52] = TRAILER_VERSION;
+        packet[53] = 7;
+
+        assert_eq!(parse_recenter_counter(&packet), Some(7));
+        assert_eq!(parse_recenter_counter(&packet[..PACKET_SIZE]), None);
     }
 }
