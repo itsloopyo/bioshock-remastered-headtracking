@@ -95,7 +95,30 @@ WorldSpaceYaw=true
 [Hotkeys]
 ; Page Down - toggle world/local yaw
 YawModeKey=0x22
+
+[Smoothing]
+; Smoothing applied when the tracker runs on this machine (loopback).
+; 0 = no smoothing, 1 = heavy. Covers rotation and position.
+LocalSmoothing=0.0
+; Smoothing applied when the tracker is a remote device on the network.
+; 0 = no smoothing, 1 = heavy. Covers rotation and position.
+RemoteSmoothing=0.15
 ```
+
+### Smoothing
+
+| Key | Default | Range | Applies to |
+|-----|---------|-------|------------|
+| `LocalSmoothing` | 0.0 | 0.0 - 1.0 | Smoothing applied when the tracker runs on this machine (loopback). 0 = no smoothing, 1 = heavy. |
+| `RemoteSmoothing` | 0.15 | 0.0 - 1.0 | Smoothing applied when the tracker is a remote device on the network. 0 = no smoothing, 1 = heavy. |
+
+Both cover rotation and position; there is no separate position
+smoothing setting. The mod reads the source address of each tracking
+packet: loopback (`127.0.0.1`, `::1`) means local, anything else means
+remote. Switching from a local OpenTrack instance to a phone on WiFi
+swaps the value immediately, with no game restart. Local defaults to
+zero because a same-machine tracker is already stable and any smoothing
+there is pure added latency.
 
 ### Non-default FOV
 

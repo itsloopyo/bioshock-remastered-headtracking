@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Smoothing is now two INI keys instead of one: `[Smoothing]
+  LocalSmoothing` (default `0.0`) for a tracker running on this machine,
+  and `[Smoothing] RemoteSmoothing` (default `0.15`) for a remote device
+  sending over the network. Both cover rotation and position, so the
+  separate position smoothing value is gone.
+- Removed the hidden `0.15` baseline floor. It silently overrode the
+  configured value, so local users now get zero-latency tracking by
+  default instead of a forced 0.15.
+- The OpenTrack receiver now reads each packet's source address and
+  classifies loopback senders as local and everything else as remote.
+  The smoothing value is re-selected per frame, so switching between a
+  local OpenTrack instance and a phone on WiFi takes effect without a
+  game restart.
+
 ## [0.3.6] - 2026-08-03
 
 ### Added

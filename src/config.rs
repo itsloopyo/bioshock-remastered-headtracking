@@ -9,13 +9,17 @@
 //! ```ini
 //! [overlay]
 //! fov_h = 100
+//!
+//! [Smoothing]
+//! LocalSmoothing = 0.0
+//! RemoteSmoothing = 0.15
 //! ```
 //!
 //! Loaded once at mod init. If absent or malformed, the overlay falls
 //! back to reading `DefaultFOV` from the PlayerController (which is
 //! correct for users who haven't changed the in-game FOV slider).
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 /// Accepted horizontal FOV range for the INI override. Anything outside
 /// this is rejected (logged then ignored). 40° matches the lower bound
@@ -31,6 +35,14 @@ static FOV_H_DEG_BITS: AtomicU32 = AtomicU32::new(0);
 static FOV_H_SET: AtomicBool = AtomicBool::new(false);
 static YAW_MODE_KEY: AtomicI32 = AtomicI32::new(0x22);
 
+/// User-configured smoothing, stored as f64 bits. Both cover rotation
+/// and position; the receiver's connection locality picks which one the
+/// pipeline uses per frame.
+static LOCAL_SMOOTHING_BITS: AtomicU64 =
+    AtomicU64::new(crate::smoothing::DEFAULT_LOCAL_SMOOTHING.to_bits());
+static REMOTE_SMOOTHING_BITS: AtomicU64 =
+    AtomicU64::new(crate::smoothing::DEFAULT_REMOTE_SMOOTHING.to_bits());
+
 /// Returns the user's INI-configured horizontal FOV in degrees, or
 /// `None` if no override was set.
 pub fn fov_h_override() -> Option<f32> {
@@ -43,6 +55,26 @@ pub fn fov_h_override() -> Option<f32> {
 
 pub fn yaw_mode_key() -> i32 {
     YAW_MODE_KEY.load(Ordering::Acquire)
+}
+
+/// Smoothing applied when the tracker runs on this machine (loopback).
+pub fn local_smoothing() -> f64 {
+    f64::from_bits(LOCAL_SMOOTHING_BITS.load(Ordering::Acquire))
+}
+
+/// Smoothing applied when the tracker is a remote device on the network.
+pub fn remote_smoothing() -> f64 {
+    f64::from_bits(REMOTE_SMOOTHING_BITS.load(Ordering::Acquire))
+}
+
+/// Validation only - rejects non-finite values and clamps to the
+/// documented 0.0-1.0 range. This is not a floor: 0.0 stays 0.0.
+fn parse_smoothing(value: &str) -> Option<f64> {
+    let parsed = value.trim().parse::<f64>().ok()?;
+    if !parsed.is_finite() {
+        return None;
+    }
+    Some(parsed.clamp(0.0, 1.0))
 }
 
 /// Default INI written on first launch when no config file exists.
@@ -68,6 +100,14 @@ WorldSpaceYaw=true
 [Hotkeys]
 ; Page Down - toggle world/local yaw
 YawModeKey=0x22
+
+[Smoothing]
+; Smoothing applied when the tracker runs on this machine (loopback).
+; 0 = no smoothing, 1 = heavy. Covers rotation and position.
+LocalSmoothing=0.0
+; Smoothing applied when the tracker is a remote device on the network.
+; 0 = no smoothing, 1 = heavy. Covers rotation and position.
+RemoteSmoothing=0.15
 ";
 
 /// Read `bioshock_headtrack.ini` from the working directory (where the
@@ -151,6 +191,28 @@ pub fn load() {
                     value
                 ),
             },
+            ("smoothing", "localsmoothing") => match parse_smoothing(value) {
+                Some(v) => {
+                    LOCAL_SMOOTHING_BITS.store(v.to_bits(), Ordering::Release);
+                    log::info!("config: [Smoothing] LocalSmoothing = {}", v);
+                    applied += 1;
+                }
+                None => log::warn!(
+                    "config: [Smoothing] LocalSmoothing = {:?} is not a number, using default",
+                    value
+                ),
+            },
+            ("smoothing", "remotesmoothing") => match parse_smoothing(value) {
+                Some(v) => {
+                    REMOTE_SMOOTHING_BITS.store(v.to_bits(), Ordering::Release);
+                    log::info!("config: [Smoothing] RemoteSmoothing = {}", v);
+                    applied += 1;
+                }
+                None => log::warn!(
+                    "config: [Smoothing] RemoteSmoothing = {:?} is not a number, using default",
+                    value
+                ),
+            },
             _ => {}
         }
     }
@@ -192,4 +254,37 @@ fn parse_vk(value: &str) -> Option<i32> {
         value.parse::<i32>().ok()?
     };
     (1..=0xFE).contains(&parsed).then_some(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smoothing_zero_is_kept() {
+        // No floor: a configured 0.0 must survive validation intact.
+        assert_eq!(parse_smoothing("0.0"), Some(0.0));
+    }
+
+    #[test]
+    fn smoothing_out_of_range_is_clamped() {
+        assert_eq!(parse_smoothing("-1"), Some(0.0));
+        assert_eq!(parse_smoothing("5"), Some(1.0));
+    }
+
+    #[test]
+    fn smoothing_rejects_non_numbers_and_non_finite() {
+        assert_eq!(parse_smoothing("heavy"), None);
+        assert_eq!(parse_smoothing("NaN"), None);
+        assert_eq!(parse_smoothing("inf"), None);
+    }
+
+    #[test]
+    fn smoothing_defaults_match_the_core() {
+        assert_eq!(local_smoothing(), crate::smoothing::DEFAULT_LOCAL_SMOOTHING);
+        assert_eq!(
+            remote_smoothing(),
+            crate::smoothing::DEFAULT_REMOTE_SMOOTHING
+        );
+    }
 }

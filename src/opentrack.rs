@@ -18,7 +18,7 @@
 //! For 3DOF head tracking, we only use yaw, pitch, and roll (ignoring position).
 
 use std::io;
-use std::net::UdpSocket;
+use std::net::{SocketAddr, UdpSocket};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,13 @@ const TRAILER_MAGIC: &[u8; 4] = b"HCAM";
 const TRAILER_VERSION: u8 = 1;
 const RECENTER_GAP: Duration = Duration::from_millis(500);
 static RECENTER_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// True when the most recent packet came from off-box. Set from the
+/// datagram's sender address on every packet, so switching between a
+/// local OpenTrack instance and a phone on WiFi re-selects the smoothing
+/// parameter without a game restart. Starts `false`: before any packet
+/// arrives there is no connection to smooth.
+static IS_REMOTE_CONNECTION: AtomicBool = AtomicBool::new(false);
 
 /// Socket read timeout in milliseconds (4ms allows ~250Hz polling)
 const READ_TIMEOUT_MS: u64 = 4;
@@ -144,6 +151,21 @@ pub fn try_consume_recenter_request() -> bool {
     RECENTER_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
+/// True when tracking data is arriving from a remote network device
+/// rather than from this machine. Mirrors
+/// `OpenTrackReceiver.IsRemoteConnection` in the C# core; drives the
+/// LocalSmoothing / RemoteSmoothing selection.
+pub fn is_remote_connection() -> bool {
+    IS_REMOTE_CONNECTION.load(Ordering::Acquire)
+}
+
+/// A sender is local when it is loopback (`127.0.0.1`, `::1`), and
+/// remote otherwise. Same rule as `!IPAddress.IsLoopback(senderAddress)`
+/// in the C# core.
+fn is_remote_address(addr: &SocketAddr) -> bool {
+    !addr.ip().is_loopback()
+}
+
 /// Spawn the OpenTrack UDP receiver thread.
 ///
 /// The thread first tries to bind `0.0.0.0:4242`. If another process is
@@ -230,8 +252,10 @@ fn receive_loop(socket: UdpSocket) {
             break;
         }
 
-        match socket.recv(&mut buf) {
-            Ok(size) if size >= PACKET_SIZE => {
+        match socket.recv_from(&mut buf) {
+            Ok((size, sender)) if size >= PACKET_SIZE => {
+                IS_REMOTE_CONNECTION.store(is_remote_address(&sender), Ordering::Release);
+
                 let now = Instant::now();
                 if let Some(previous) = last_packet_at {
                     if now.duration_since(previous) >= RECENTER_GAP {
@@ -275,7 +299,7 @@ fn receive_loop(socket: UdpSocket) {
                 state.pitch = data.pitch;
                 state.roll = data.roll;
             }
-            Ok(size) => {
+            Ok((size, _)) => {
                 log::warn!("Received packet with unexpected size: {} bytes", size);
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -296,6 +320,17 @@ mod tests {
     use super::*;
     use std::net::UdpSocket;
     use std::time::Duration;
+
+    #[test]
+    fn loopback_sender_is_local() {
+        assert!(!is_remote_address(&"127.0.0.1:4242".parse().unwrap()));
+        assert!(!is_remote_address(&"[::1]:4242".parse().unwrap()));
+    }
+
+    #[test]
+    fn lan_sender_is_remote() {
+        assert!(is_remote_address(&"192.168.1.50:4242".parse().unwrap()));
+    }
 
     /// Helper to compare f64 values with tolerance
     fn approx_eq(a: f64, b: f64) -> bool {

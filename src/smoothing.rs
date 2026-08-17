@@ -16,8 +16,8 @@
 //!     -> per-axis Interpolator (lerp between successive samples,
 //!        EMA-estimated sample interval, velocity extrapolation up to
 //!        half a sample period past the latest known value)
-//!     -> per-axis Smoother (frame-rate independent exponential, with
-//!        the project-standard 0.15 baseline floor)
+//!     -> per-axis Smoother (frame-rate independent exponential, using
+//!        the connection-selected LocalSmoothing / RemoteSmoothing value)
 //!     -> consumed by engine_hook (FRotator / FVector) and the D3D
 //!        overlay (reticle projection)
 //!
@@ -43,18 +43,30 @@ const MIN_SAMPLE_INTERVAL: f64 = 0.001;
 const MAX_SAMPLE_INTERVAL: f64 = 0.2;
 const MAX_EXTRAPOLATION_FRACTION: f64 = 0.5;
 
-/// Baseline smoothing floor. Matches `kBaselineSmoothing` in the C++
-/// core / `BaselineSmoothing` in C#. High-refresh displays show jitter
-/// on wireless / phone trackers below this floor; do not lower it.
-const BASELINE_SMOOTHING: f64 = 0.15;
+/// Default smoothing for a tracker running on this machine (loopback).
+/// Matches `DefaultLocalSmoothing` in the C# core /
+/// `kDefaultLocalSmoothing` in the C++ core.
+pub const DEFAULT_LOCAL_SMOOTHING: f64 = 0.0;
 
-/// User-facing smoothing factor for rotation. 0.0 = floor only; 1.0 =
-/// very heavy. Held at 0 to match the project doctrine default; the
-/// 0.15 floor is what does the actual de-jitter work.
-const ROT_SMOOTHING: f64 = 0.0;
+/// Default smoothing for a remote device sending over the network.
+/// Matches `DefaultRemoteSmoothing` / `kDefaultRemoteSmoothing`.
+pub const DEFAULT_REMOTE_SMOOTHING: f64 = 0.15;
 
-/// User-facing smoothing factor for position. Same scale as rotation.
-const POS_SMOOTHING: f64 = 0.0;
+/// Select the smoothing value for the current connection. This is the
+/// only path by which a smoothing value reaches the smoother; never pick
+/// with an `if` at the call site.
+#[inline]
+pub fn get_effective_smoothing(
+    local_smoothing: f64,
+    remote_smoothing: f64,
+    is_remote_connection: bool,
+) -> f64 {
+    if is_remote_connection {
+        remote_smoothing
+    } else {
+        local_smoothing
+    }
+}
 
 /// Lower clamp on per-frame dt. Prevents division-by-near-zero in the
 /// progress integration if two ticks land in the same microsecond.
@@ -162,18 +174,13 @@ impl Smoother {
     }
 
     fn update(&mut self, target: f64, smoothing: f64, dt: f64) -> f64 {
-        let s = if smoothing < BASELINE_SMOOTHING {
-            BASELINE_SMOOTHING
-        } else {
-            smoothing
-        };
         if !self.has_value {
             self.current = target;
             self.has_value = true;
             return target;
         }
         // 0..1 maps to speeds 50..0.1. Matches SmoothingUtils.cs / .h.
-        let speed = lerp(50.0, 0.1, s);
+        let speed = lerp(50.0, 0.1, smoothing).clamp(0.1, 50.0);
         let t = 1.0 - (-speed * dt).exp();
         self.current += (target - self.current) * t;
         self.current
@@ -242,22 +249,31 @@ pub fn tick_frame() -> SmoothedPose {
     let is_new = seq != pipe.last_seen_seq;
     pipe.last_seen_seq = seq;
 
+    // Re-read the connection locality every frame so switching between a
+    // local OpenTrack instance and a phone on WiFi picks up the other
+    // parameter without a game restart.
+    let smoothing = get_effective_smoothing(
+        crate::config::local_smoothing(),
+        crate::config::remote_smoothing(),
+        crate::opentrack::is_remote_connection(),
+    );
+
     let (raw_yaw, raw_pitch, raw_roll) = get_recentered_rotation_atomic();
     let iy = pipe.rot[0].update(raw_yaw, is_new, dt);
     let ip = pipe.rot[1].update(raw_pitch, is_new, dt);
     let ir = pipe.rot[2].update(raw_roll, is_new, dt);
-    let sy = pipe.rot_smooth[0].update(iy, ROT_SMOOTHING, dt);
-    let sp = pipe.rot_smooth[1].update(ip, ROT_SMOOTHING, dt);
-    let sr = pipe.rot_smooth[2].update(ir, ROT_SMOOTHING, dt);
+    let sy = pipe.rot_smooth[0].update(iy, smoothing, dt);
+    let sp = pipe.rot_smooth[1].update(ip, smoothing, dt);
+    let sr = pipe.rot_smooth[2].update(ir, smoothing, dt);
     ATOMIC_SMOOTHED_ROTATION.store(sy, sp, sr);
 
     let (raw_x, raw_y_pos, raw_z) = get_recentered_position_atomic();
     let ix = pipe.pos[0].update(raw_x, is_new, dt);
     let iy_pos = pipe.pos[1].update(raw_y_pos, is_new, dt);
     let iz = pipe.pos[2].update(raw_z, is_new, dt);
-    let sx = pipe.pos_smooth[0].update(ix, POS_SMOOTHING, dt);
-    let sy_pos = pipe.pos_smooth[1].update(iy_pos, POS_SMOOTHING, dt);
-    let sz = pipe.pos_smooth[2].update(iz, POS_SMOOTHING, dt);
+    let sx = pipe.pos_smooth[0].update(ix, smoothing, dt);
+    let sy_pos = pipe.pos_smooth[1].update(iy_pos, smoothing, dt);
+    let sz = pipe.pos_smooth[2].update(iz, smoothing, dt);
     ATOMIC_SMOOTHED_POSITION.store(sx, sy_pos, sz);
 
     SmoothedPose {
@@ -340,22 +356,45 @@ mod tests {
     #[test]
     fn smoother_converges_toward_target() {
         let mut s = Smoother::new();
-        s.update(0.0, 0.0, 0.016);
+        s.update(0.0, DEFAULT_REMOTE_SMOOTHING, 0.016);
         let mut last = 0.0;
         for _ in 0..30 {
-            last = s.update(100.0, 0.0, 0.016);
+            last = s.update(100.0, DEFAULT_REMOTE_SMOOTHING, 0.016);
         }
         assert!(last > 90.0, "smoother didn't converge: {}", last);
     }
 
     #[test]
-    fn smoother_baseline_floor_enforced() {
-        // With smoothing < floor, the floor (0.15) is what controls
-        // convergence speed - so a single small step shouldn't snap.
+    fn smoother_zero_smoothing_is_near_instant() {
+        // LocalSmoothing defaults to 0.0: speed is the 50.0 end of the
+        // ramp, so a single 16ms step lands almost on the target. There
+        // is no floor holding it back any more.
         let mut s = Smoother::new();
-        s.update(0.0, 0.0, 0.016);
-        let out = s.update(100.0, 0.0, 0.016);
-        assert!(out < 100.0, "baseline floor not applied: {}", out);
+        s.update(0.0, DEFAULT_LOCAL_SMOOTHING, 0.016);
+        let out = s.update(100.0, DEFAULT_LOCAL_SMOOTHING, 0.016);
+        assert!(out > 54.0, "zero smoothing still floored: {}", out);
+    }
+
+    #[test]
+    fn smoother_remote_smoothing_lags() {
+        // RemoteSmoothing defaults to 0.15, which must visibly lag a
+        // single step rather than snap.
+        let mut s = Smoother::new();
+        s.update(0.0, DEFAULT_REMOTE_SMOOTHING, 0.016);
+        let out = s.update(100.0, DEFAULT_REMOTE_SMOOTHING, 0.016);
+        assert!(out < 100.0, "remote smoothing not applied: {}", out);
+    }
+
+    #[test]
+    fn effective_smoothing_selects_on_connection() {
+        assert!(
+            (get_effective_smoothing(0.0, 0.15, true) - 0.15).abs() < 1e-9,
+            "remote connection must use remote smoothing"
+        );
+        assert!(
+            (get_effective_smoothing(0.0, 0.15, false) - 0.0).abs() < 1e-9,
+            "local connection must use local smoothing"
+        );
     }
 
     #[test]
