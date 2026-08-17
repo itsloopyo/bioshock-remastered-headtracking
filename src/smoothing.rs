@@ -43,6 +43,52 @@ const MIN_SAMPLE_INTERVAL: f64 = 0.001;
 const MAX_SAMPLE_INTERVAL: f64 = 0.2;
 const MAX_EXTRAPOLATION_FRACTION: f64 = 0.5;
 
+/// Seconds a sample may be late before the extrapolation starts expiring.
+/// Sized to outlast an ordinary Wi-Fi loss burst (50-200ms), because a
+/// dropped packet or two is still a live feed and must behave exactly as
+/// it did before: continue the prediction, then hold. Retreating on a
+/// dropped packet would pull the camera BACKWARDS against a head that is
+/// still turning, which reads far worse than the flat spot it replaces.
+const EXTRAPOLATION_HOLD: f64 = 0.25;
+
+/// Seconds over which a genuinely stalled feed converges back to the last
+/// reported sample. Long enough that the correction is a drift, not a snap.
+const EXTRAPOLATION_DECAY: f64 = 0.35;
+
+/// Segment position to sample at, given interpolation progress and how
+/// long the next sample has been outstanding.
+///
+/// Progress past 1.0 is extrapolation: a short prediction that keeps
+/// velocity continuous between samples. It is only a prediction, so it
+/// must not outlive the sample it predicted from. Clamping and then
+/// HOLDING parks the output at 1.5x the last reported pose forever
+/// whenever samples stop arriving - a tracker app streaming its last
+/// value while the face is lost, or a head so still that consecutive
+/// samples are bit-identical and never bump the sample sequence. A 25
+/// degree head turn then renders as 37.5 degrees and stays there.
+///
+/// So the prediction expires, but on a WALL CLOCK rather than on
+/// progress: progress is measured in units of an estimated sample
+/// interval, and that estimate is stale by construction in exactly the
+/// stall case, because the EMA only updates when a new sample arrives.
+/// Below the hold threshold this is bit-for-bit the old behaviour; past
+/// it the segment position eases - smoothstep, so there is no velocity
+/// step at either end - to 1.0, the pose the tracker actually reported.
+/// Matches `PoseInterpolator::SegmentPosition` in the C++ core.
+fn segment_position(progress: f64, time_since_last_sample: f64) -> f64 {
+    if progress < 0.0 {
+        return 0.0;
+    }
+    let pt = progress.min(1.0 + MAX_EXTRAPOLATION_FRACTION);
+    if time_since_last_sample <= EXTRAPOLATION_HOLD {
+        return pt;
+    }
+
+    let u = ((time_since_last_sample - EXTRAPOLATION_HOLD) / EXTRAPOLATION_DECAY).min(1.0);
+    let eased = u * u * (3.0 - 2.0 * u);
+    pt + (1.0 - pt) * eased
+}
+
 /// Default smoothing for a tracker running on this machine (loopback).
 /// Matches `DefaultLocalSmoothing` in the C# core /
 /// `kDefaultLocalSmoothing` in the C++ core.
@@ -134,8 +180,7 @@ impl Interpolator {
             // Capture the current (possibly extrapolated) position as
             // the new segment's start so velocity stays continuous
             // across sample boundaries.
-            let max_p = 1.0 + MAX_EXTRAPOLATION_FRACTION;
-            let t = self.progress.clamp(0.0, max_p);
+            let t = segment_position(self.progress, self.time_since_last_sample);
             self.from += (self.to - self.from) * t;
 
             self.to = raw;
@@ -149,8 +194,7 @@ impl Interpolator {
 
         self.progress += dt / self.sample_interval;
 
-        let max_pt = 1.0 + MAX_EXTRAPOLATION_FRACTION;
-        let pt = self.progress.clamp(0.0, max_pt);
+        let pt = segment_position(self.progress, self.time_since_last_sample);
         self.from + (self.to - self.from) * pt
     }
 }
@@ -344,6 +388,68 @@ mod tests {
         let out = interp.update(10.0, false, 1.0);
         // Cap is 1.5 of the segment so output should be at most 15
         assert!(out <= 15.0 + 1e-6, "extrapolation not capped: {}", out);
+    }
+
+    #[test]
+    fn extrapolation_holds_through_a_dropped_packet_burst() {
+        // Under the hold threshold a stalled sample is just a dropped
+        // packet: the prediction continues to the cap and stays there, the
+        // same as it always did. Retreating here would drag the camera
+        // back against a head that is still turning.
+        let mut interp = Interpolator::new();
+        interp.update(0.0, true, 0.0);
+        interp.update(10.0, true, 1.0 / 60.0);
+
+        let mut out = 0.0;
+        for _ in 0..12 {
+            out = interp.update(10.0, false, 1.0 / 60.0); // 200ms of silence
+        }
+        assert!(
+            out >= 15.0 - 1e-6,
+            "hold window regressed, extrapolation retreated early: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn extrapolation_expires_when_samples_stop() {
+        // A tracker that has lost the face streams its last value forever.
+        // Held at the cap, a 10 unit step renders as 15 and never comes
+        // back; it must ease to the value the tracker actually reported.
+        let mut interp = Interpolator::new();
+        interp.update(0.0, true, 0.0);
+        interp.update(10.0, true, 1.0 / 60.0);
+
+        let mut out = 0.0;
+        for _ in 0..60 {
+            out = interp.update(10.0, false, 1.0 / 60.0); // 1s of silence
+        }
+        assert!(
+            (out - 10.0).abs() < 1e-6,
+            "extrapolation parked past the reported sample: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn segment_position_eases_on_the_wall_clock() {
+        // Exactly at the hold threshold nothing has moved yet, the decay is
+        // smoothstep so halfway through it is halfway back, and past it the
+        // segment sits on the reported sample.
+        let capped = 1.0 + MAX_EXTRAPOLATION_FRACTION;
+        assert!((segment_position(capped, EXTRAPOLATION_HOLD) - capped).abs() < 1e-9);
+        assert!(
+            (segment_position(capped, EXTRAPOLATION_HOLD + EXTRAPOLATION_DECAY / 2.0) - 1.25).abs()
+                < 1e-9
+        );
+        assert!(
+            (segment_position(
+                capped,
+                EXTRAPOLATION_HOLD + EXTRAPOLATION_DECAY + EXTRAPOLATION_DECAY
+            ) - 1.0)
+                .abs()
+                < 1e-9
+        );
     }
 
     #[test]
