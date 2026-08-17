@@ -114,6 +114,18 @@ pub fn get_effective_smoothing(
     }
 }
 
+/// Asymmetric per-axis position limits, in centimetres. More forward than
+/// back so the player can lean toward the screen without the camera
+/// clipping through the player model behind them, and far less down than
+/// up for the same reason. `forward` is positive here: OpenTrack's `+Z`
+/// (away from the screen) is negated at the receiver boundary, in
+/// `get_recentered_position_atomic`.
+pub const POS_LIMIT_FORWARD_CM: f64 = 40.0;
+pub const POS_LIMIT_BACK_CM: f64 = 10.0;
+pub const POS_LIMIT_SIDE_CM: f64 = 30.0;
+pub const POS_LIMIT_UP_CM: f64 = 20.0;
+pub const POS_LIMIT_DOWN_CM: f64 = 5.0;
+
 /// Lower clamp on per-frame dt. Prevents division-by-near-zero in the
 /// progress integration if two ticks land in the same microsecond.
 const MIN_FRAME_DT: f64 = 0.0001;
@@ -236,11 +248,51 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
 
+/// One position axis, from raw centimetres to a limit-bounded offset.
+#[derive(Debug, Clone, Copy)]
+struct PositionAxis {
+    interp: Interpolator,
+    smooth: Smoother,
+    min: f64,
+    max: f64,
+}
+
+impl PositionAxis {
+    const fn new(min: f64, max: f64) -> Self {
+        Self {
+            interp: Interpolator::new(),
+            smooth: Smoother::new(),
+            min,
+            max,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.interp.reset();
+        self.smooth.reset();
+    }
+
+    /// Clamped BEFORE smoothing as well as after. The smoothing state used
+    /// to track the unclamped input, so a lean past the limits drove it far
+    /// outside them and it then sat saturated on the way back, pinning the
+    /// output at the limit for hundreds of milliseconds after the head had
+    /// returned. Clamping an already-bounded input is a no-op, so ordinary
+    /// movement is unchanged. Matches PositionProcessor in the core.
+    fn update(&mut self, raw: f64, is_new_sample: bool, dt: f64, smoothing: f64) -> f64 {
+        let interpolated = self
+            .interp
+            .update(raw, is_new_sample, dt)
+            .clamp(self.min, self.max);
+        self.smooth
+            .update(interpolated, smoothing, dt)
+            .clamp(self.min, self.max)
+    }
+}
+
 struct Pipeline {
     rot: [Interpolator; 3],
-    pos: [Interpolator; 3],
     rot_smooth: [Smoother; 3],
-    pos_smooth: [Smoother; 3],
+    pos: [PositionAxis; 3],
     last_frame: Option<Instant>,
     last_seen_seq: u64,
 }
@@ -249,9 +301,12 @@ impl Pipeline {
     const fn new() -> Self {
         Self {
             rot: [Interpolator::new(); 3],
-            pos: [Interpolator::new(); 3],
             rot_smooth: [Smoother::new(); 3],
-            pos_smooth: [Smoother::new(); 3],
+            pos: [
+                PositionAxis::new(-POS_LIMIT_SIDE_CM, POS_LIMIT_SIDE_CM),
+                PositionAxis::new(-POS_LIMIT_DOWN_CM, POS_LIMIT_UP_CM),
+                PositionAxis::new(-POS_LIMIT_BACK_CM, POS_LIMIT_FORWARD_CM),
+            ],
             last_frame: None,
             last_seen_seq: 0,
         }
@@ -312,12 +367,9 @@ pub fn tick_frame() -> SmoothedPose {
     ATOMIC_SMOOTHED_ROTATION.store(sy, sp, sr);
 
     let (raw_x, raw_y_pos, raw_z) = get_recentered_position_atomic();
-    let ix = pipe.pos[0].update(raw_x, is_new, dt);
-    let iy_pos = pipe.pos[1].update(raw_y_pos, is_new, dt);
-    let iz = pipe.pos[2].update(raw_z, is_new, dt);
-    let sx = pipe.pos_smooth[0].update(ix, smoothing, dt);
-    let sy_pos = pipe.pos_smooth[1].update(iy_pos, smoothing, dt);
-    let sz = pipe.pos_smooth[2].update(iz, smoothing, dt);
+    let sx = pipe.pos[0].update(raw_x, is_new, dt, smoothing);
+    let sy_pos = pipe.pos[1].update(raw_y_pos, is_new, dt, smoothing);
+    let sz = pipe.pos[2].update(raw_z, is_new, dt, smoothing);
     ATOMIC_SMOOTHED_POSITION.store(sx, sy_pos, sz);
 
     SmoothedPose {
@@ -334,9 +386,8 @@ pub fn reset() {
     let mut pipe = PIPELINE.lock();
     for i in 0..3 {
         pipe.rot[i].reset();
-        pipe.pos[i].reset();
         pipe.rot_smooth[i].reset();
-        pipe.pos_smooth[i].reset();
+        pipe.pos[i].reset();
     }
     pipe.last_frame = None;
     pipe.last_seen_seq = 0;
@@ -500,6 +551,51 @@ mod tests {
         assert!(
             (get_effective_smoothing(0.0, 0.15, false) - 0.0).abs() < 1e-9,
             "local connection must use local smoothing"
+        );
+    }
+
+    #[test]
+    fn position_axis_holds_the_limits() {
+        let mut axis = PositionAxis::new(-POS_LIMIT_BACK_CM, POS_LIMIT_FORWARD_CM);
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            axis.update(100.0, true, dt, DEFAULT_REMOTE_SMOOTHING);
+        }
+        let out = axis.update(100.0, true, dt, DEFAULT_REMOTE_SMOOTHING);
+        assert!(
+            out <= POS_LIMIT_FORWARD_CM + 1e-9,
+            "forward lean exceeded its limit: {}",
+            out
+        );
+
+        for _ in 0..60 {
+            axis.update(-100.0, true, dt, DEFAULT_REMOTE_SMOOTHING);
+        }
+        let out = axis.update(-100.0, true, dt, DEFAULT_REMOTE_SMOOTHING);
+        assert!(
+            out >= -POS_LIMIT_BACK_CM - 1e-9,
+            "backward lean exceeded its tighter limit: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn position_axis_does_not_wind_up_outside_its_limits() {
+        // Hold a 100cm lean, well past the 40cm forward limit, then return
+        // the head to centre. Smoothing an unclamped input leaves the state
+        // parked at 100 and it stays saturated on the way back, pinning the
+        // output at the limit long after the head has returned.
+        let mut axis = PositionAxis::new(-POS_LIMIT_BACK_CM, POS_LIMIT_FORWARD_CM);
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            axis.update(100.0, true, dt, DEFAULT_REMOTE_SMOOTHING);
+        }
+
+        let out = axis.update(0.0, true, dt, DEFAULT_REMOTE_SMOOTHING);
+        assert!(
+            out < POS_LIMIT_FORWARD_CM - 1.0,
+            "smoothing state wound up outside the limit and pinned the output: {}",
+            out
         );
     }
 
