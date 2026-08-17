@@ -71,15 +71,6 @@ struct Basis {
     up: Vec3,
 }
 
-/// Asymmetric per-axis position limits, in centimetres. More forward
-/// than back so the player can lean toward the screen without the
-/// camera clipping through the player model behind them.
-const POS_LIMIT_FORWARD_CM: f64 = 40.0;
-const POS_LIMIT_BACK_CM: f64 = 10.0;
-const POS_LIMIT_SIDE_CM: f64 = 30.0;
-const POS_LIMIT_UP_CM: f64 = 20.0;
-const POS_LIMIT_DOWN_CM: f64 = 5.0;
-
 /// `eventPlayerCalcView` is MSVC __thiscall on x86: `this` in ECX, stack
 /// args pushed right-to-left, callee cleans.
 type EventPlayerCalcViewFn = unsafe extern "thiscall" fn(
@@ -389,11 +380,9 @@ unsafe extern "thiscall" fn event_player_calc_view_detour(
     // "into the screen" relative to the player's in-world heading,
     // not where their head is currently turned.
     if is_position_enabled_atomic() && !camera_location.is_null() {
-        let (right_cm, up_cm, forward_cm) = pose.position;
-
-        let right = right_cm.clamp(-POS_LIMIT_SIDE_CM, POS_LIMIT_SIDE_CM);
-        let up = up_cm.clamp(-POS_LIMIT_DOWN_CM, POS_LIMIT_UP_CM);
-        let forward = forward_cm.clamp(-POS_LIMIT_BACK_CM, POS_LIMIT_FORWARD_CM);
+        // Already bounded to the per-axis limits by the smoothing pipeline,
+        // on both sides of the smoother.
+        let (right, up, forward) = pose.position;
 
         // Rotate (forward, right) into world XY using clean yaw.
         // UE convention: forward = +X world, right = +Y world.
