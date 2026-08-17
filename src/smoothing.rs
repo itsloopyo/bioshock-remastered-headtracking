@@ -38,10 +38,33 @@ use crate::tracking::{
 };
 
 const INTERVAL_BLEND: f64 = 0.3;
-const DEFAULT_SAMPLE_INTERVAL: f64 = 1.0 / 60.0;
+
+/// Assumed interval between tracker samples until real ones are observed.
+/// Matches `kDefaultSampleInterval` in the C++ core and
+/// `DefaultSampleInterval` in C#.
+///
+/// The EMA only learns the true rate from a gap wider than
+/// `MIN_SAMPLE_INTERVAL`, so a session that opens with two packets in quick
+/// succession - a connect burst, or two datagrams landing between two
+/// render frames - runs its whole first segment on this default. At 1/60 a
+/// 30Hz tracker's first segment advanced at twice the true rate: it reached
+/// the extrapolation cap halfway through the sample period and sat 50%
+/// past the pose the tracker had reported for the rest of it. That is the
+/// first-second-of-session jolt native mods had and Unity mods did not, and
+/// it recurs after every recenter, because a recenter resets the estimate.
+/// Guessing slow is safe (the segment lands short and the next sample
+/// corrects it); guessing fast overshoots.
+const DEFAULT_SAMPLE_INTERVAL: f64 = 1.0 / 30.0;
+
 const MIN_SAMPLE_INTERVAL: f64 = 0.001;
 const MAX_SAMPLE_INTERVAL: f64 = 0.2;
 const MAX_EXTRAPOLATION_FRACTION: f64 = 0.5;
+
+/// Frame delta assumed on the very first tick, when there is no previous
+/// frame to measure against. A frame length, not a sample interval: the two
+/// were the same constant, so changing the sample-interval default silently
+/// doubled the first frame's dt.
+const FIRST_FRAME_DT: f64 = 1.0 / 60.0;
 
 /// Seconds a sample may be late before the extrapolation starts expiring.
 /// Sized to outlast an ordinary Wi-Fi loss burst (50-200ms), because a
@@ -340,7 +363,7 @@ pub fn tick_frame() -> SmoothedPose {
     let now = Instant::now();
     let dt = match pipe.last_frame {
         Some(prev) => (now - prev).as_secs_f64().clamp(MIN_FRAME_DT, MAX_FRAME_DT),
-        None => DEFAULT_SAMPLE_INTERVAL,
+        None => FIRST_FRAME_DT,
     };
     pipe.last_frame = Some(now);
 
@@ -439,6 +462,32 @@ mod tests {
         let out = interp.update(10.0, false, 1.0);
         // Cap is 1.5 of the segment so output should be at most 15
         assert!(out <= 15.0 + 1e-6, "extrapolation not capped: {}", out);
+    }
+
+    #[test]
+    fn thirty_hertz_first_segment_lands_on_its_sample() {
+        // Two samples closer together than MIN_SAMPLE_INTERVAL teach the EMA
+        // nothing - a shadow or reflection pass re-entering the camera hook
+        // inside one frame with a packet in between - so the first real
+        // segment runs on the default interval. For a 30Hz feed on a 120Hz
+        // display that segment must land on the pose the tracker reported
+        // after one sample period: guessing too fast reaches the
+        // extrapolation cap halfway through and sits 50% past it, guessing
+        // too slow leaves the camera short of a sample that already arrived.
+        let frame = 1.0 / 120.0;
+        let mut interp = Interpolator::new();
+        interp.update(0.0, true, frame); // first sample parks here
+        interp.update(10.0, true, MIN_FRAME_DT); // second hook pass, same frame
+
+        let mut out = 0.0;
+        for _ in 0..4 {
+            out = interp.update(10.0, false, frame); // one 30Hz sample period
+        }
+        assert!(
+            (out - 10.0).abs() < 0.5,
+            "first segment missed its sample by more than 5%: {}",
+            out
+        );
     }
 
     #[test]
