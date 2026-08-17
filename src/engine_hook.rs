@@ -185,36 +185,44 @@ fn rotator_to_basis(rot: &FRotator) -> Basis {
     }
 }
 
+/// |cos(pitch)| below which yaw and roll are the same rotation and have to
+/// be extracted together. Reached whenever the game's own view pitch plus
+/// the head's pitch lands on vertical, which the 65536-unit FRotator
+/// quantisation makes an exactly-representable angle rather than a
+/// measure-zero one.
+const VERTICAL_COS_PITCH: f64 = 1e-6;
+
 fn basis_to_rotator(basis: Basis) -> FRotator {
     let pitch = basis.forward.z.clamp(-1.0, 1.0).asin();
-    let yaw = basis.forward.y.atan2(basis.forward.x);
     let cp = pitch.cos();
-    let (right0, up0) = if cp.abs() > 1e-6 {
-        (
-            Vec3 {
-                x: -yaw.sin(),
-                y: yaw.cos(),
-                z: 0.0,
-            },
-            Vec3 {
-                x: -pitch.sin() * yaw.cos(),
-                y: -pitch.sin() * yaw.sin(),
-                z: cp,
-            },
-        )
-    } else {
-        (
-            Vec3 {
-                x: basis.right.x,
-                y: basis.right.y,
-                z: 0.0,
-            },
-            Vec3 {
-                x: 0.0,
-                y: 0.0,
-                z: cp.signum(),
-            },
-        )
+
+    if cp.abs() <= VERTICAL_COS_PITCH {
+        // Forward is vertical, so `atan2(forward.y, forward.x)` has nothing
+        // left to read and the yaw-from-forward, roll-from-right pair both
+        // collapse to zero - discarding up to 90 degrees of heading and
+        // snapping the view to due north. The right vector still carries it:
+        // right is (-sin yaw, cos yaw, 0) whatever the pitch, and at the
+        // singularity a roll about the vertical view axis IS a yaw, so
+        // folding the whole heading into yaw reproduces the orientation
+        // exactly and stays continuous with the general branch.
+        let yaw = (-basis.right.x).atan2(basis.right.y);
+        return FRotator {
+            pitch: deg_to_units(pitch.to_degrees()),
+            yaw: deg_to_units(yaw.to_degrees()),
+            roll: 0,
+        };
+    }
+
+    let yaw = basis.forward.y.atan2(basis.forward.x);
+    let right0 = Vec3 {
+        x: -yaw.sin(),
+        y: yaw.cos(),
+        z: 0.0,
+    };
+    let up0 = Vec3 {
+        x: -pitch.sin() * yaw.cos(),
+        y: -pitch.sin() * yaw.sin(),
+        z: cp,
     };
     let roll = (-dot(basis.right, up0)).atan2(dot(basis.right, right0));
     FRotator {
@@ -437,6 +445,69 @@ pub fn install(target_addr: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Largest per-axis discrepancy between two orientations. The FRotator
+    /// round trip quantises to 65536ths of a turn, so ~2e-4 is the floor.
+    fn basis_error(a: Basis, b: Basis) -> f64 {
+        let axis = |p: Vec3, q: Vec3| {
+            ((p.x - q.x).powi(2) + (p.y - q.y).powi(2) + (p.z - q.z).powi(2)).sqrt()
+        };
+        axis(a.forward, b.forward)
+            .max(axis(a.right, b.right))
+            .max(axis(a.up, b.up))
+    }
+
+    fn rotator(pitch_deg: f64, yaw_deg: f64, roll_deg: f64) -> FRotator {
+        FRotator {
+            pitch: deg_to_units(pitch_deg),
+            yaw: deg_to_units(yaw_deg),
+            roll: deg_to_units(roll_deg),
+        }
+    }
+
+    #[test]
+    fn vertical_pitch_keeps_the_heading() {
+        // The game's view pitch plus the head's pitch summing to vertical is
+        // ordinary play (look steeply down, tilt the head down). At exactly
+        // vertical the yaw/roll pair is degenerate, and a decomposition that
+        // zeroes both throws the heading away: the view snaps to due north,
+        // then snaps back as soon as the sum leaves vertical.
+        for &(clean_pitch, head_pitch) in &[(0.0, 90.0), (0.0, -90.0), (-46.0, -44.0)] {
+            for &head_roll in &[0.0, 30.0, -75.0] {
+                let clean = rotator(clean_pitch, 45.0, 0.0);
+                let composed = mul_basis(
+                    rotator_to_basis(&clean),
+                    rotator_to_basis(&rotator(head_pitch, -30.0, -head_roll)),
+                );
+
+                let error = basis_error(composed, rotator_to_basis(&basis_to_rotator(composed)));
+                assert!(
+                    error < 1e-2,
+                    "orientation lost at vertical pitch (clean {}, head {}, roll {}): error {}",
+                    clean_pitch,
+                    head_pitch,
+                    head_roll,
+                    error
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn well_conditioned_pitch_round_trips() {
+        // Control for the branch above: away from vertical the decomposition
+        // is unchanged and must still reproduce its input.
+        for &pitch in &[-80.0, -35.0, 0.0, 35.0, 80.0] {
+            let composed = rotator_to_basis(&rotator(pitch, 137.0, 20.0));
+            let error = basis_error(composed, rotator_to_basis(&basis_to_rotator(composed)));
+            assert!(
+                error < 1e-2,
+                "round trip failed at pitch {}: {}",
+                pitch,
+                error
+            );
+        }
+    }
 
     #[test]
     fn yaw_modes_diverge_at_steep_pitch() {
