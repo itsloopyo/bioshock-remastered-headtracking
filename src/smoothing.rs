@@ -158,8 +158,55 @@ const MIN_FRAME_DT: f64 = 0.0001;
 /// past the latest sample.
 const MAX_FRAME_DT: f64 = 0.1;
 
+/// Normalises an angle in degrees to -180..180. Matches `NormalizeAngle` in
+/// the core's `angle_utils.h`.
+fn normalize_angle(angle: f64) -> f64 {
+    if (-180.0..=180.0).contains(&angle) {
+        return angle;
+    }
+    let wrapped = angle % 360.0;
+    if wrapped > 180.0 {
+        wrapped - 360.0
+    } else if wrapped < -180.0 {
+        wrapped + 360.0
+    } else {
+        wrapped
+    }
+}
+
+/// Shortest signed angular distance from `from` to `to`, in degrees.
+/// Matches `ShortestAngleDelta` in the core's `angle_utils.h`.
+fn shortest_angle_delta(from: f64, to: f64) -> f64 {
+    normalize_angle(to - from)
+}
+
+/// Whether an axis wraps at the +/-180 degree seam.
+///
+/// Yaw and roll do. Pitch does not: a tracker derives it from asin, which
+/// bounds it to +/-90. Position axes are centimetres and MUST NOT, or a
+/// 200cm reading would come out as -160cm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AxisKind {
+    Angular,
+    Linear,
+}
+
+impl AxisKind {
+    /// Move `t` of the way from `from` to `to`.
+    fn interpolate(self, from: f64, to: f64, t: f64) -> f64 {
+        match self {
+            // Lerping the raw scalar difference sends a 1 degree movement
+            // across the seam, 179.5 to -179.5, the long way round instead:
+            // -359 degrees, through every heading in between.
+            Self::Angular => normalize_angle(from + shortest_angle_delta(from, to) * t),
+            Self::Linear => from + (to - from) * t,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Interpolator {
+    kind: AxisKind,
     from: f64,
     to: f64,
     progress: f64,
@@ -170,8 +217,9 @@ struct Interpolator {
 }
 
 impl Interpolator {
-    const fn new() -> Self {
+    const fn new(kind: AxisKind) -> Self {
         Self {
+            kind,
             from: 0.0,
             to: 0.0,
             progress: 0.0,
@@ -182,8 +230,16 @@ impl Interpolator {
         }
     }
 
+    const fn angular() -> Self {
+        Self::new(AxisKind::Angular)
+    }
+
+    const fn linear() -> Self {
+        Self::new(AxisKind::Linear)
+    }
+
     fn reset(&mut self) {
-        *self = Self::new();
+        *self = Self::new(self.kind);
     }
 
     fn update(&mut self, raw: f64, is_new_sample: bool, dt: f64) -> f64 {
@@ -216,7 +272,7 @@ impl Interpolator {
             // the new segment's start so velocity stays continuous
             // across sample boundaries.
             let t = segment_position(self.progress, self.time_since_last_sample);
-            self.from += (self.to - self.from) * t;
+            self.from = self.kind.interpolate(self.from, self.to, t);
 
             self.to = raw;
             self.progress = 0.0;
@@ -230,28 +286,42 @@ impl Interpolator {
         self.progress += dt / self.sample_interval;
 
         let pt = segment_position(self.progress, self.time_since_last_sample);
-        self.from + (self.to - self.from) * pt
+        self.kind.interpolate(self.from, self.to, pt)
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Smoother {
+    kind: AxisKind,
     current: f64,
     has_value: bool,
 }
 
 impl Smoother {
-    const fn new() -> Self {
+    const fn new(kind: AxisKind) -> Self {
         Self {
+            kind,
             current: 0.0,
             has_value: false,
         }
     }
 
-    fn reset(&mut self) {
-        *self = Self::new();
+    const fn angular() -> Self {
+        Self::new(AxisKind::Angular)
     }
 
+    const fn linear() -> Self {
+        Self::new(AxisKind::Linear)
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new(self.kind);
+    }
+
+    /// Angular axes take the shortest path around the seam here too, not
+    /// just in the interpolator. Matches `SmoothAngle` in the core's
+    /// `smoothing_utils.h`, which the core's TrackingProcessor uses for yaw
+    /// and roll while pitch uses the plain scalar `Smooth`.
     fn update(&mut self, target: f64, smoothing: f64, dt: f64) -> f64 {
         if !self.has_value {
             self.current = target;
@@ -261,7 +331,7 @@ impl Smoother {
         // 0..1 maps to speeds 50..0.1. Matches SmoothingUtils.cs / .h.
         let speed = lerp(50.0, 0.1, smoothing).clamp(0.1, 50.0);
         let t = 1.0 - (-speed * dt).exp();
-        self.current += (target - self.current) * t;
+        self.current = self.kind.interpolate(self.current, target, t);
         self.current
     }
 }
@@ -283,8 +353,8 @@ struct PositionAxis {
 impl PositionAxis {
     const fn new(min: f64, max: f64) -> Self {
         Self {
-            interp: Interpolator::new(),
-            smooth: Smoother::new(),
+            interp: Interpolator::linear(),
+            smooth: Smoother::linear(),
             min,
             max,
         }
@@ -323,8 +393,15 @@ struct Pipeline {
 impl Pipeline {
     const fn new() -> Self {
         Self {
-            rot: [Interpolator::new(); 3],
-            rot_smooth: [Smoother::new(); 3],
+            // Yaw and roll wrap at the seam; pitch is asin-bounded to +/-90
+            // and cannot. Order matches the tuples from
+            // get_recentered_rotation_atomic: yaw, pitch, roll.
+            rot: [
+                Interpolator::angular(),
+                Interpolator::linear(),
+                Interpolator::angular(),
+            ],
+            rot_smooth: [Smoother::angular(), Smoother::linear(), Smoother::angular()],
             pos: [
                 PositionAxis::new(-POS_LIMIT_SIDE_CM, POS_LIMIT_SIDE_CM),
                 PositionAxis::new(-POS_LIMIT_DOWN_CM, POS_LIMIT_UP_CM),
@@ -422,7 +499,7 @@ mod tests {
 
     #[test]
     fn interpolator_first_sample_parks_at_value() {
-        let mut interp = Interpolator::new();
+        let mut interp = Interpolator::linear();
         let out = interp.update(42.0, true, 0.016);
         assert!((out - 42.0).abs() < 1e-9);
     }
@@ -432,7 +509,7 @@ mod tests {
         // Tracker at 60Hz, display at 120Hz: every other frame is a
         // non-new-sample frame, and on the next-new-sample frame the
         // call lands halfway through the freshly-opened segment.
-        let mut interp = Interpolator::new();
+        let mut interp = Interpolator::linear();
         interp.update(0.0, true, 0.0); // sample at t=0
         interp.update(0.0, false, 1.0 / 120.0); // no-new frame at t=8.33ms
         let mid = interp.update(10.0, true, 1.0 / 120.0); // sample at t=16.67ms
@@ -444,7 +521,7 @@ mod tests {
     fn interpolator_lerps_within_open_segment() {
         // Two samples 1/60 apart; mid-segment 120Hz tick should be
         // halfway between from and to.
-        let mut interp = Interpolator::new();
+        let mut interp = Interpolator::linear();
         interp.update(0.0, true, 0.0);
         interp.update(0.0, false, 1.0 / 120.0);
         interp.update(10.0, true, 1.0 / 120.0); // open segment 0->10
@@ -455,7 +532,7 @@ mod tests {
 
     #[test]
     fn interpolator_extrapolation_capped() {
-        let mut interp = Interpolator::new();
+        let mut interp = Interpolator::linear();
         interp.update(0.0, true, 0.0);
         interp.update(10.0, true, 1.0 / 60.0);
         // Drive far past the next expected sample with no new data
@@ -475,7 +552,7 @@ mod tests {
         // extrapolation cap halfway through and sits 50% past it, guessing
         // too slow leaves the camera short of a sample that already arrived.
         let frame = 1.0 / 120.0;
-        let mut interp = Interpolator::new();
+        let mut interp = Interpolator::linear();
         interp.update(0.0, true, frame); // first sample parks here
         interp.update(10.0, true, MIN_FRAME_DT); // second hook pass, same frame
 
@@ -496,7 +573,7 @@ mod tests {
         // packet: the prediction continues to the cap and stays there, the
         // same as it always did. Retreating here would drag the camera
         // back against a head that is still turning.
-        let mut interp = Interpolator::new();
+        let mut interp = Interpolator::linear();
         interp.update(0.0, true, 0.0);
         interp.update(10.0, true, 1.0 / 60.0);
 
@@ -516,7 +593,7 @@ mod tests {
         // A tracker that has lost the face streams its last value forever.
         // Held at the cap, a 10 unit step renders as 15 and never comes
         // back; it must ease to the value the tracker actually reported.
-        let mut interp = Interpolator::new();
+        let mut interp = Interpolator::linear();
         interp.update(0.0, true, 0.0);
         interp.update(10.0, true, 1.0 / 60.0);
 
@@ -553,15 +630,99 @@ mod tests {
     }
 
     #[test]
+    fn angle_helpers_wrap_at_the_seam() {
+        assert!((normalize_angle(190.0) - (-170.0)).abs() < 1e-9);
+        assert!((normalize_angle(-190.0) - 170.0).abs() < 1e-9);
+        assert!((normalize_angle(45.0) - 45.0).abs() < 1e-9);
+        // Both directions: a delta that only works one way round is a sign
+        // error that half the tests would still pass.
+        assert!((shortest_angle_delta(179.0, -179.0) - 2.0).abs() < 1e-9);
+        assert!((shortest_angle_delta(-179.0, 179.0) - (-2.0)).abs() < 1e-9);
+        assert!((shortest_angle_delta(10.0, 20.0) - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn interpolator_crosses_the_seam_the_short_way() {
+        // 179 to -179 is a 2 degree head movement. Lerping the raw scalar
+        // difference sweeps -358 degrees the long way round instead, through
+        // every heading in between. Tested in both directions, because a
+        // sign error in the delta passes one and fails the other.
+        let frame = 1.0 / 120.0;
+        for &(from, to) in &[(179.0, -179.0), (-179.0, 179.0)] {
+            let mut interp = Interpolator::angular();
+            interp.update(from, true, frame); // parks here
+            interp.update(from, false, frame); // measures a 2-frame sample interval
+            let mid = interp.update(to, true, frame); // lands halfway across
+
+            // Halfway through a 2 degree hop across the seam is +/-180.
+            let error = shortest_angle_delta(180.0, mid).abs();
+            assert!(
+                error < 1.0,
+                "seam crossing {} -> {} went the long way: midpoint {} is {} degrees off 180",
+                from,
+                to,
+                mid,
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn linear_axis_does_not_wrap_at_180() {
+        // Position rides the same interpolator, in centimetres. Normalising
+        // it would turn a 200cm reading into -160cm, throwing the camera to
+        // the opposite side of the head's travel.
+        let frame = 1.0 / 120.0;
+        let mut interp = Interpolator::linear();
+        interp.update(0.0, true, frame);
+        let out = interp.update(200.0, true, frame);
+        assert!(
+            (out - 200.0).abs() < 1e-9,
+            "a linear axis wrapped at the angular seam: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn smoother_crosses_the_seam_the_short_way() {
+        // The smoother needs the shortest path as much as the interpolator:
+        // seam-correct interpolation feeding a scalar-lerp smoother still
+        // swings the camera the long way round.
+        let dt = 1.0 / 60.0;
+        for &(seed, target) in &[(179.0, -179.0), (-179.0, 179.0)] {
+            let mut s = Smoother::angular();
+            s.update(seed, DEFAULT_REMOTE_SMOOTHING, dt);
+            let out = s.update(target, DEFAULT_REMOTE_SMOOTHING, dt);
+
+            let moved = shortest_angle_delta(seed, out);
+            let wanted = shortest_angle_delta(seed, target);
+            assert!(
+                moved * wanted > 0.0,
+                "smoothing {} toward {} moved the wrong way: {}",
+                seed,
+                target,
+                out
+            );
+            assert!(
+                moved.abs() <= wanted.abs() + 1e-9,
+                "smoothing {} toward {} overshot the 2 degree gap: {}",
+                seed,
+                target,
+                out
+            );
+        }
+    }
+
+    #[test]
     fn smoother_first_value_is_target() {
-        let mut s = Smoother::new();
+        let mut s = Smoother::linear();
         let out = s.update(50.0, 0.0, 0.016);
         assert!((out - 50.0).abs() < 1e-9);
     }
 
     #[test]
     fn smoother_converges_toward_target() {
-        let mut s = Smoother::new();
+        let mut s = Smoother::linear();
         s.update(0.0, DEFAULT_REMOTE_SMOOTHING, 0.016);
         let mut last = 0.0;
         for _ in 0..30 {
@@ -575,7 +736,7 @@ mod tests {
         // LocalSmoothing defaults to 0.0: speed is the 50.0 end of the
         // ramp, so a single 16ms step lands almost on the target. There
         // is no floor holding it back any more.
-        let mut s = Smoother::new();
+        let mut s = Smoother::linear();
         s.update(0.0, DEFAULT_LOCAL_SMOOTHING, 0.016);
         let out = s.update(100.0, DEFAULT_LOCAL_SMOOTHING, 0.016);
         assert!(out > 54.0, "zero smoothing still floored: {}", out);
@@ -585,7 +746,7 @@ mod tests {
     fn smoother_remote_smoothing_lags() {
         // RemoteSmoothing defaults to 0.15, which must visibly lag a
         // single step rather than snap.
-        let mut s = Smoother::new();
+        let mut s = Smoother::linear();
         s.update(0.0, DEFAULT_REMOTE_SMOOTHING, 0.016);
         let out = s.update(100.0, DEFAULT_REMOTE_SMOOTHING, 0.016);
         assert!(out < 100.0, "remote smoothing not applied: {}", out);
