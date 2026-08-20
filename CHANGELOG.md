@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.0] - 2026-08-20
+
+### Added
+
+- select smoothing per connection instead of a baseline floor
+- drop mod-side recentring, latch the noisy receive-loop logs
+
+### Fixed
+
+- honour the 5s HCAM re-arm window and publish a press with its pose
+- expire the extrapolation instead of holding the overshoot
+- clamp position into the limits before smoothing, not only after
+- keep the heading when the view pitch reaches vertical
+- assume a 30Hz tracker, not 60Hz, until the real rate is measured
+- take the shortest arc for yaw and roll across the 180 seam
+- pass required ShimMarker to Invoke-DevDeployShim
+
 ## [Unreleased]
 
 ### Added
