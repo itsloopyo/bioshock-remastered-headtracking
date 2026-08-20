@@ -2,8 +2,30 @@
 
 ## [Unreleased]
 
+### Added
+
+- A `First tracker packet from ...` line in the log. Nothing previously recorded
+  that tracker data had arrived, so a log from a misconfigured tracker looked
+  identical to a healthy one.
+
+### Fixed
+
+- The mod no longer aborts the game when it cannot create its log file. Under
+  `panic = "abort"` the old `.expect` took the whole process down over a
+  diagnostic file; it now continues without logging.
+- Three receive-loop warnings (non-finite packet, unexpected packet size, UDP
+  receive error) were logged per datagram with no latch. A tracker emitting NaN
+  produced ~250 lines a second, and a sticky socket error spun the loop with no
+  sleep and logged at CPU speed. Each is now reported once, with the socket
+  error deduplicated by error kind.
+
 ### Changed
 
+- Removed recentring from the mod. The `Home` / `Ctrl+Shift+T` hotkey is
+  gone, and the mod no longer acts on the CENTER signal a tracker app
+  sends in its packets. Centre the view in your tracker app instead. A
+  centre in the mod sat in series with the tracker's own and the two
+  drifted apart, so switching trackers meant recentring twice.
 - Smoothing is now two INI keys instead of one: `[Smoothing]
   LocalSmoothing` (default `0.0`) for a tracker running on this machine,
   and `[Smoothing] RemoteSmoothing` (default `0.15`) for a remote device

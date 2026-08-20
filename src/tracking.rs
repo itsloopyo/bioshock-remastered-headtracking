@@ -9,14 +9,14 @@
 //! The `GLOBAL_STATE` is a lazy-initialized, thread-safe singleton that provides:
 //!
 //! - **UDP Receiver Thread**: Updates yaw/pitch/roll values at ~250Hz
-//! - **Hotkey Handler Thread**: Modifies enabled flag and recenter offset
+//! - **Hotkey Handler Thread**: Modifies the enabled flag and tracking modes
 //! - **DirectX Render Hook**: Reads state each frame to apply camera rotation
 //!
 //! # Thread Safety
 //!
 //! Uses a hybrid approach for optimal performance:
 //! - **Atomics** for frequently accessed rotation values (lock-free)
-//! - **RwLock** for less frequently accessed state (toggle, recenter)
+//! - **RwLock** for less frequently accessed state (toggle, tracking mode)
 //!
 //! This eliminates lock contention on the hot path (rotation reads at 60-120Hz)
 //! while maintaining proper synchronization for control operations.
@@ -126,9 +126,6 @@ pub struct TrackingState {
     /// Current roll rotation from OpenTrack (degrees) - LEGACY, use atomic_rotation
     pub roll: f64,
 
-    /// Recenter offset, subtracted from rotation values (Home / Ctrl+Shift+T).
-    pub recenter_offset: (f64, f64, f64),
-
     /// Rotational-tracking flag, cycled by the tracking-mode hotkey
     /// (Page Up / Ctrl+Shift+G) alongside `position_enabled`.
     pub rotation_enabled: bool,
@@ -142,9 +139,6 @@ pub struct TrackingState {
 
     /// Debounce timer for the tracking-enable toggle.
     pub last_toggle_time: Instant,
-
-    /// Debounce timer for the recenter hotkey.
-    pub last_recenter_time: Instant,
 
     /// Debounce timer for the tracking-mode cycle hotkey.
     pub last_cycle_mode_time: Instant,
@@ -168,19 +162,12 @@ pub struct TrackingState {
 /// RwLock contention. Updated by UDP receiver, read by render hook.
 pub static ATOMIC_ROTATION: AtomicRotation = AtomicRotation::new();
 
-/// Atomic recenter offset for lock-free access
-pub static ATOMIC_RECENTER: AtomicRotation = AtomicRotation::new();
-
 /// Lock-free atomic position (x, y, z) values from the OpenTrack
 /// packet, in centimetres. Reuses the `AtomicRotation` slot type
 /// (three lock-free f64 fields) for consistency with rotation -
 /// the field names are misnomers in this case but the storage is
 /// the same.
 pub static ATOMIC_POSITION: AtomicRotation = AtomicRotation::new();
-
-/// Atomic position-recenter offset (cm). Subtracted from raw
-/// position to give the head's displacement from the recenter origin.
-pub static ATOMIC_POSITION_RECENTER: AtomicRotation = AtomicRotation::new();
 
 /// Monotonic sample-sequence counter, bumped once per OpenTrack packet
 /// after the rotation+position atomics are written. The smoothing
@@ -192,8 +179,8 @@ pub static ATOMIC_POSITION_RECENTER: AtomicRotation = AtomicRotation::new();
 /// instead of the true sample interval.
 pub static ATOMIC_SAMPLE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Smoothed rotation in degrees, post-interpolation + post-smoothing,
-/// post-recenter. Written by `smoothing::tick_frame` from the engine
+/// Smoothed rotation in degrees, post-interpolation + post-smoothing.
+/// Written by `smoothing::tick_frame` from the engine
 /// hook each render frame; read by the D3D11 reticle overlay so its
 /// projection uses the SAME head pose the engine_hook just baked into
 /// the FRotator. Without sharing this through an atomic, the overlay
@@ -202,8 +189,8 @@ pub static ATOMIC_SAMPLE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::
 pub static ATOMIC_SMOOTHED_ROTATION: AtomicRotation = AtomicRotation::new();
 
 /// Smoothed body-frame position offset in centimetres
-/// `(right, up, forward)`, post-interpolation + post-smoothing,
-/// post-recenter. Same rationale as `ATOMIC_SMOOTHED_ROTATION`.
+/// `(right, up, forward)`, post-interpolation + post-smoothing. Same
+/// rationale as `ATOMIC_SMOOTHED_ROTATION`.
 pub static ATOMIC_SMOOTHED_POSITION: AtomicRotation = AtomicRotation::new();
 
 /// Atomic enabled flag for lock-free access
@@ -223,13 +210,11 @@ impl Default for TrackingState {
             yaw: 0.0,
             pitch: 0.0,
             roll: 0.0,
-            recenter_offset: (0.0, 0.0, 0.0),
             rotation_enabled: true,
             position_enabled: true,
             // Start active - state detector defaults to Gameplay
             gameplay_active: true,
             last_toggle_time: now,
-            last_recenter_time: now,
             last_cycle_mode_time: now,
             world_space_yaw: ATOMIC_WORLD_SPACE_YAW.load(Ordering::Acquire),
             last_yaw_mode_time: now - std::time::Duration::from_millis(crate::hotkeys::DEBOUNCE_MS),
@@ -240,38 +225,6 @@ impl Default for TrackingState {
 }
 
 impl TrackingState {
-    /// Get the recentered rotation values
-    pub fn get_recentered_rotation(&self) -> (f64, f64, f64) {
-        (
-            self.yaw - self.recenter_offset.0,
-            self.pitch - self.recenter_offset.1,
-            self.roll - self.recenter_offset.2,
-        )
-    }
-
-    /// Capture current rotation AND position as the recenter origin.
-    /// After this, future head-tracking deltas are measured relative
-    /// to the head pose at the moment of the press.
-    pub fn set_recenter(&mut self) {
-        self.recenter_offset = (self.yaw, self.pitch, self.roll);
-        ATOMIC_RECENTER.store(self.yaw, self.pitch, self.roll);
-        let (px, py, pz) = ATOMIC_POSITION.load();
-        ATOMIC_POSITION_RECENTER.store(px, py, pz);
-        // Drop the smoother / interpolator state so the new center
-        // becomes the parked target instead of a target that the
-        // smoother lerps toward from the old pose.
-        crate::smoothing::reset();
-        log::info!(
-            "Recentered: yaw={:.2}° pitch={:.2}° roll={:.2}°  pos=({:.2},{:.2},{:.2})cm",
-            self.yaw,
-            self.pitch,
-            self.roll,
-            px,
-            py,
-            pz
-        );
-    }
-
     /// Toggle enabled state
     pub fn toggle(&mut self) {
         self.enabled = !self.enabled;
@@ -334,7 +287,7 @@ pub fn is_world_space_yaw_atomic() -> bool {
     ATOMIC_WORLD_SPACE_YAW.load(Ordering::Acquire)
 }
 
-/// Get recentered rotation values using lock-free atomics
+/// Get the tracker's rotation values using lock-free atomics
 ///
 /// This is the optimized hot path for reading rotation values in the render hook.
 /// Uses atomic operations instead of RwLock for ~10x faster access.
@@ -345,10 +298,8 @@ pub fn is_world_space_yaw_atomic() -> bool {
 /// to ensure proper synchronization between the UDP receiver (writer)
 /// and render hook (reader).
 #[inline(always)]
-pub fn get_recentered_rotation_atomic() -> (f64, f64, f64) {
-    let (yaw, pitch, roll) = ATOMIC_ROTATION.load();
-    let (offset_yaw, offset_pitch, offset_roll) = ATOMIC_RECENTER.load();
-    (yaw - offset_yaw, pitch - offset_pitch, roll - offset_roll)
+pub fn get_rotation_atomic() -> (f64, f64, f64) {
+    ATOMIC_ROTATION.load()
 }
 
 /// Check if head tracking is enabled using lock-free atomic
@@ -383,20 +334,19 @@ pub fn update_position_atomic(x: f64, y: f64, z: f64) {
     ATOMIC_POSITION.store(x, y, z);
 }
 
-/// Get recentered position deltas in head-frame centimetres:
+/// Get the tracker's position deltas in head-frame centimetres:
 /// `(right, up, forward)`. Sign conventions, all 1:1 with no
 /// sensitivity scaling:
-///   - `right`   = `-(x - ox)` - OpenTrack X is inverted relative to
+///   - `right`   = `-x` - OpenTrack X is inverted relative to
 ///     what BSR's camera basis expects, so the lateral axis gets a
 ///     leading minus.
-///   - `up`      = `y - oy` - passes through.
-///   - `forward` = `-(z - oz)` - OpenTrack `+Z = back`, we want
+///   - `up`      = `y` - passes through.
+///   - `forward` = `-z` - OpenTrack `+Z = back`, we want
 ///     `+forward = lean toward screen`, so negate.
 #[inline(always)]
-pub fn get_recentered_position_atomic() -> (f64, f64, f64) {
+pub fn get_position_atomic() -> (f64, f64, f64) {
     let (x, y, z) = ATOMIC_POSITION.load();
-    let (ox, oy, oz) = ATOMIC_POSITION_RECENTER.load();
-    (-(x - ox), y - oy, -(z - oz))
+    (-x, y, -z)
 }
 
 /// Lock-free check for the rotation-tracking flag. Mirrored from
@@ -421,7 +371,7 @@ pub fn is_position_enabled_atomic() -> bool {
 
 /// The head offset that engine_hook actually applied this frame, in
 /// body-frame centimetres `(right, up, forward)` - i.e. what
-/// `get_recentered_position_atomic()` returned, clamped to the
+/// `get_position_atomic()` returned, clamped to the
 /// per-axis limits, AND zeroed when position tracking is toggled
 /// off. The overlay reads this so the reticle can compensate for
 /// parallax: with positional tracking on, the rendered view shifts
@@ -454,7 +404,7 @@ pub fn applied_head_offset() -> (f64, f64, f64) {
 /// // Reading state (in render hook)
 /// let (yaw, pitch, roll) = {
 ///     let state = GLOBAL_STATE.read();
-///     state.get_recentered_rotation()
+///     (state.yaw, state.pitch, state.roll)
 /// };
 ///
 /// // Modifying state (in hotkey handler)
@@ -490,23 +440,6 @@ mod tests {
         assert!(
             (state.roll - 0.0).abs() < f64::EPSILON,
             "Default roll should be 0"
-        );
-    }
-
-    #[test]
-    fn test_default_recenter_offset_zero() {
-        let state = TrackingState::default();
-        assert!(
-            (state.recenter_offset.0 - 0.0).abs() < f64::EPSILON,
-            "Default recenter yaw should be 0"
-        );
-        assert!(
-            (state.recenter_offset.1 - 0.0).abs() < f64::EPSILON,
-            "Default recenter pitch should be 0"
-        );
-        assert!(
-            (state.recenter_offset.2 - 0.0).abs() < f64::EPSILON,
-            "Default recenter roll should be 0"
         );
     }
 
@@ -548,137 +481,6 @@ mod tests {
         state.toggle(); // Should log "Head tracking disabled"
         state.toggle(); // Should log "Head tracking enabled"
                         // No assertions needed - just verifying no panics
-    }
-
-    #[test]
-    fn test_set_recenter_captures_current() {
-        let mut state = TrackingState::default();
-        state.yaw = 45.5;
-        state.pitch = -12.3;
-        state.roll = 8.7;
-
-        state.set_recenter();
-
-        assert!((state.recenter_offset.0 - 45.5).abs() < 0.0001);
-        assert!((state.recenter_offset.1 - (-12.3)).abs() < 0.0001);
-        assert!((state.recenter_offset.2 - 8.7).abs() < 0.0001);
-    }
-
-    #[test]
-    fn test_get_recentered_rotation_subtracts_offset() {
-        let mut state = TrackingState::default();
-        state.yaw = 90.0;
-        state.pitch = 30.0;
-        state.roll = -15.0;
-        state.recenter_offset = (45.0, 10.0, -5.0);
-
-        let (y, p, r) = state.get_recentered_rotation();
-
-        assert!(
-            (y - 45.0).abs() < 0.0001,
-            "Recentered yaw should be 90 - 45 = 45"
-        );
-        assert!(
-            (p - 20.0).abs() < 0.0001,
-            "Recentered pitch should be 30 - 10 = 20"
-        );
-        assert!(
-            (r - (-10.0)).abs() < 0.0001,
-            "Recentered roll should be -15 - (-5) = -10"
-        );
-    }
-
-    #[test]
-    fn test_get_recentered_rotation_zero_offset() {
-        let mut state = TrackingState::default();
-        state.yaw = 45.0;
-        state.pitch = 20.0;
-        state.roll = -10.0;
-        // recenter_offset is (0, 0, 0) by default
-
-        let (y, p, r) = state.get_recentered_rotation();
-
-        assert!(
-            (y - 45.0).abs() < 0.0001,
-            "With zero offset, yaw should be unchanged"
-        );
-        assert!(
-            (p - 20.0).abs() < 0.0001,
-            "With zero offset, pitch should be unchanged"
-        );
-        assert!(
-            (r - (-10.0)).abs() < 0.0001,
-            "With zero offset, roll should be unchanged"
-        );
-    }
-
-    #[test]
-    fn test_recenter_then_get_rotation_is_zero() {
-        let mut state = TrackingState::default();
-        state.yaw = 60.0;
-        state.pitch = -25.0;
-        state.roll = 15.0;
-
-        // Recenter at current position
-        state.set_recenter();
-
-        // After recentering, effective rotation should be zero
-        let (y, p, r) = state.get_recentered_rotation();
-
-        assert!(
-            (y - 0.0).abs() < 0.0001,
-            "After recenter, effective yaw should be 0"
-        );
-        assert!(
-            (p - 0.0).abs() < 0.0001,
-            "After recenter, effective pitch should be 0"
-        );
-        assert!(
-            (r - 0.0).abs() < 0.0001,
-            "After recenter, effective roll should be 0"
-        );
-    }
-
-    #[test]
-    fn test_rotation_after_recenter() {
-        let mut state = TrackingState::default();
-
-        // Initial position
-        state.yaw = 30.0;
-        state.pitch = 10.0;
-        state.roll = -5.0;
-
-        // Recenter here
-        state.set_recenter();
-
-        // Move head 15 degrees right (yaw)
-        state.yaw = 45.0;
-        state.pitch = 10.0;
-        state.roll = -5.0;
-
-        let (y, p, r) = state.get_recentered_rotation();
-
-        assert!(
-            (y - 15.0).abs() < 0.0001,
-            "Should show 15 degree yaw from center"
-        );
-        assert!((p - 0.0).abs() < 0.0001, "Pitch unchanged from center");
-        assert!((r - 0.0).abs() < 0.0001, "Roll unchanged from center");
-    }
-
-    #[test]
-    fn test_extreme_rotation_values() {
-        let mut state = TrackingState::default();
-        state.yaw = 180.0;
-        state.pitch = 90.0;
-        state.roll = -90.0;
-        state.recenter_offset = (-180.0, -90.0, 90.0);
-
-        let (y, p, r) = state.get_recentered_rotation();
-
-        assert!((y - 360.0).abs() < 0.0001);
-        assert!((p - 180.0).abs() < 0.0001);
-        assert!((r - (-180.0)).abs() < 0.0001);
     }
 
     #[test]
@@ -766,32 +568,6 @@ mod tests {
 
         // Reset for other tests
         update_rotation_atomic(0.0, 0.0, 0.0);
-    }
-
-    #[test]
-    fn test_get_recentered_rotation_atomic() {
-        // Set rotation and recenter offset
-        ATOMIC_ROTATION.store(90.0, 45.0, 30.0);
-        ATOMIC_RECENTER.store(30.0, 15.0, 10.0);
-
-        let (y, p, r) = get_recentered_rotation_atomic();
-
-        assert!(
-            (y - 60.0).abs() < 0.0001,
-            "Recentered yaw should be 90 - 30 = 60"
-        );
-        assert!(
-            (p - 30.0).abs() < 0.0001,
-            "Recentered pitch should be 45 - 15 = 30"
-        );
-        assert!(
-            (r - 20.0).abs() < 0.0001,
-            "Recentered roll should be 30 - 10 = 20"
-        );
-
-        // Reset for other tests
-        ATOMIC_ROTATION.store(0.0, 0.0, 0.0);
-        ATOMIC_RECENTER.store(0.0, 0.0, 0.0);
     }
 
     #[test]

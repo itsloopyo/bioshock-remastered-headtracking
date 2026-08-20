@@ -185,14 +185,30 @@ fn initialize_mod() {
 
 /// File logger setup. Falls back to `%TEMP%` if the working-directory
 /// log file can't be created (e.g. read-only Steam install).
+///
+/// `File::create` truncates, so each launch starts a fresh log and a user
+/// sending one in is only ever sending the session they are reporting on.
 fn init_logging() {
+    // Logging is a diagnostic convenience, not a functional requirement: head
+    // tracking runs fine without a log. The release profile is `panic = "abort"`,
+    // so panicking here (the old `.expect`) would take the whole game down just
+    // because a log file could not be created. Degrade to no logging instead.
+    let file = std::fs::File::create("bioshock_headtrack.log").or_else(|_| {
+        std::fs::File::create(std::env::temp_dir().join("bioshock_headtrack.log"))
+    });
+    let file = match file {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "Head tracking: could not create a log file ({e}); continuing without logging"
+            );
+            return;
+        }
+    };
     if let Err(e) = simplelog::WriteLogger::init(
         simplelog::LevelFilter::Info,
         simplelog::Config::default(),
-        std::fs::File::create("bioshock_headtrack.log").unwrap_or_else(|_| {
-            std::fs::File::create(std::env::temp_dir().join("bioshock_headtrack.log"))
-                .expect("Failed to create log file")
-        }),
+        file,
     ) {
         eprintln!("Failed to initialize logging: {}", e);
     }

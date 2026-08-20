@@ -5,12 +5,11 @@
 //!
 //! | Action              | Nav-cluster | Chord          |
 //! |---------------------|-------------|----------------|
-//! | Recenter            | Home        | Ctrl+Shift+T   |
 //! | Toggle tracking     | End         | Ctrl+Shift+Y   |
 //! | Cycle tracking mode | Page Up     | Ctrl+Shift+G   |
 //! | Toggle yaw mode     | Page Down   | Ctrl+Shift+H   |
 //!
-//! The chord letters T/Y/G form a vertical 1x3 strip in the
+//! The chord letters Y/G/H form a vertical strip in the
 //! T/Y/U/G/H/J cluster on the keyboard - easy to recall.
 //! `Ctrl+Shift+<letter>` is universally avoided by games (Ctrl is
 //! crouch / interact, Shift is sprint / weapon-wheel, both together
@@ -35,12 +34,10 @@ use crate::tracking::{TrackingState, GLOBAL_STATE};
 const VK_SHIFT: i32 = 0x10;
 const VK_CONTROL: i32 = 0x11;
 const VK_END: i32 = 0x23;
-const VK_HOME: i32 = 0x24;
 const VK_PAGE_UP: i32 = 0x21;
 const VK_PAGE_DOWN: i32 = 0x22;
 const VK_H: i32 = 0x48;
 const VK_G: i32 = 0x47;
-const VK_T: i32 = 0x54;
 const VK_Y: i32 = 0x59;
 
 /// Debounce window per action.
@@ -98,9 +95,6 @@ fn fired_edge(
 fn tick(state: &mut TrackingState) {
     let debounce = Duration::from_millis(DEBOUNCE_MS);
 
-    if fired(VK_HOME, VK_T, &mut state.last_recenter_time, debounce) {
-        state.set_recenter();
-    }
     if fired(VK_END, VK_Y, &mut state.last_toggle_time, debounce) {
         state.toggle();
     }
@@ -152,12 +146,10 @@ mod tests {
 
     #[test]
     fn vk_constants_match_standard_bindings() {
-        assert_eq!(VK_HOME, 0x24);
         assert_eq!(VK_END, 0x23);
         assert_eq!(VK_PAGE_UP, 0x21);
         assert_eq!(VK_PAGE_DOWN, 0x22);
         assert_eq!(crate::config::yaw_mode_key(), 0x22);
-        assert_eq!(VK_T, 0x54);
         assert_eq!(VK_Y, 0x59);
         assert_eq!(VK_G, 0x47);
         assert_eq!(VK_H, 0x48);

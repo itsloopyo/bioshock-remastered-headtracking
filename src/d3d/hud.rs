@@ -221,7 +221,7 @@ unsafe extern "system" fn hooked_present(this: *mut c_void, sync_interval: u32, 
     // the swap. Only does anything when head tracking is enabled.
     if crate::tracking::is_enabled_atomic() {
         // Read the SAME smoothed values engine_hook just wrote into
-        // the FRotator. Reading the raw recentered atomic here would
+        // the FRotator. Reading the raw tracker atomic here would
         // make the reticle drift away from the rendered view by one
         // tracker-period of motion (jitter on phone trackers, ~16ms
         // lag at 60Hz).

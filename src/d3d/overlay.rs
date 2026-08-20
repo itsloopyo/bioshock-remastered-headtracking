@@ -534,7 +534,7 @@ unsafe fn update_cb(ctx: &ID3D11DeviceContext, cb: &ID3D11Buffer, data: OverlayC
 /// First call lazily initialises; later calls update the constant
 /// buffer and draw.
 ///
-/// `yaw_deg` / `pitch_deg` are the current recentered head rotation
+/// `yaw_deg` / `pitch_deg` are the current head rotation
 /// from OpenTrack. The reticle is placed at the screen position where
 /// mouse-forward (unchanged by head motion) projects into the
 /// head-rotated view.
