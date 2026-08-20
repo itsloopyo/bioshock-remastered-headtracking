@@ -20,7 +20,7 @@
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -34,22 +34,9 @@ pub const OPENTRACK_PORT: u16 = 4242;
 /// OpenTrack packet size: 6 doubles * 8 bytes = 48 bytes
 pub const PACKET_SIZE: usize = 48;
 
+/// Sized for the largest datagram we accept: a 48-byte pose plus a Headcam
+/// trailer. Only the pose is read, but a short buffer would truncate the read.
 const RECEIVE_BUFFER_SIZE: usize = 64;
-const TRAILER_SIZE: usize = 54;
-const TRAILER_MAGIC: &[u8; 4] = b"HCAM";
-const TRAILER_VERSION: u8 = 1;
-/// Packet silence after which trailer first-sighting re-arms. A tracker
-/// app restart resets its counter, so a value latched from the old
-/// session would swallow the first CENTER press of the new one.
-///
-/// Fixed at ~5s by the wire contract, and deliberately far longer than a
-/// connection-liveness timeout: at 500ms an ordinary Wi-Fi stall inside a
-/// recenter burst re-armed mid-burst, so the burst's tail - carrying the
-/// SAME counter - read as a second press and recentred on whatever pose
-/// the head had drifted to. Matches `kRecenterRearmMs` in the core's
-/// `UdpReceiver` / `PollingUdpReceiver`.
-const RECENTER_REARM: Duration = Duration::from_millis(5000);
-static RECENTER_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// True when the most recent packet came from off-box. Set from the
 /// datagram's sender address on every packet, so switching between a
@@ -115,7 +102,7 @@ impl OpenTrackData {
     /// glitching tracker) can deliver a datagram. A single non-finite value
     /// would flow into the exponential smoother and pin its running value
     /// at `NaN` permanently, so every later sample stays `NaN` until a
-    /// recenter or toggle resets the pipeline. Non-finite tracking data is
+    /// tracking toggle resets the pipeline. Non-finite tracking data is
     /// never legitimate, so we drop the packet at the boundary rather than
     /// let it poison state.
     pub fn is_finite(&self) -> bool {
@@ -147,76 +134,28 @@ impl OpenTrackData {
     }
 }
 
-fn parse_recenter_counter(data: &[u8]) -> Option<u8> {
-    if data.len() < TRAILER_SIZE
-        || &data[48..52] != TRAILER_MAGIC
-        || data[52] < TRAILER_VERSION
-    {
-        return None;
-    }
-    Some(data[53])
-}
+static NON_FINITE_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// Tracks the Headcam trailer's recenter counter across datagrams so a
-/// CENTER press is recognised exactly once: the first trailer sighting is
-/// a press, a counter change is a press, a repeat is not.
-struct RecenterDetector {
-    last_counter: Option<u8>,
-    last_packet_at: Option<Instant>,
-}
-
-impl RecenterDetector {
-    const fn new() -> Self {
-        Self {
-            last_counter: None,
-            last_packet_at: None,
-        }
-    }
-
-    /// True when this datagram carries a press.
-    fn observe(&mut self, datagram: &[u8], now: Instant) -> bool {
-        if let Some(previous) = self.last_packet_at {
-            if now.duration_since(previous) >= RECENTER_REARM {
-                self.last_counter = None;
-            }
-        }
-        self.last_packet_at = Some(now);
-
-        let Some(counter) = parse_recenter_counter(datagram) else {
-            return false;
-        };
-        let pressed = self.last_counter != Some(counter);
-        self.last_counter = Some(counter);
-        pressed
-    }
-}
-
-/// Decode one datagram into a pose plus whether it carried a CENTER
-/// press. `None` discards the datagram whole - and with it any press it
-/// announced, because a press is only meaningful alongside the zeroed
-/// pose the tracker sent it with.
-fn decode_datagram(
-    detector: &mut RecenterDetector,
-    datagram: &[u8],
-    now: Instant,
-) -> Option<(OpenTrackData, bool)> {
-    let pressed = detector.observe(datagram, now);
-
+/// Decode one datagram into a pose. `None` discards the datagram whole.
+///
+/// Only the first 48 bytes are read: a Headcam datagram carries a trailer
+/// past the pose, and this mod has nothing to do with it.
+fn decode_datagram(datagram: &[u8]) -> Option<OpenTrackData> {
     let packet: &[u8; PACKET_SIZE] = datagram[..PACKET_SIZE].try_into().unwrap();
     let data = OpenTrackData::from_bytes(packet);
 
     // Drop non-finite packets at the boundary: a single NaN/Inf would pin
     // the smoother at NaN for the rest of the session.
     if !data.is_finite() {
-        log::warn!("Discarding OpenTrack packet with non-finite values");
+        // A tracker stuck emitting NaN sends these at full packet rate, so the
+        // warning is latched: one line, not 250 a second.
+        if !NON_FINITE_LOGGED.swap(true, Ordering::Relaxed) {
+            log::warn!("Discarding OpenTrack packet with non-finite values (logged once)");
+        }
         return None;
     }
 
-    Some((data, pressed))
-}
-
-pub fn try_consume_recenter_request() -> bool {
-    RECENTER_REQUESTED.swap(false, Ordering::AcqRel)
+    Some(data)
 }
 
 /// True when tracking data is arriving from a remote network device
@@ -311,7 +250,11 @@ fn bind_with_retry() -> Option<UdpSocket> {
 
 fn receive_loop(socket: UdpSocket) {
     let mut buf = [0u8; RECEIVE_BUFFER_SIZE];
-    let mut recenter = RecenterDetector::new();
+    // All three of these fire per datagram or per failed recv, so each is
+    // reported once rather than at packet rate.
+    let mut first_packet_logged = false;
+    let mut bad_size_logged = false;
+    let mut last_logged_error_kind: Option<io::ErrorKind> = None;
 
     loop {
         if GLOBAL_STATE.read().shutdown_requested {
@@ -323,9 +266,7 @@ fn receive_loop(socket: UdpSocket) {
             Ok((size, sender)) if size >= PACKET_SIZE => {
                 IS_REMOTE_CONNECTION.store(is_remote_address(&sender), Ordering::Release);
 
-                let Some((data, pressed)) =
-                    decode_datagram(&mut recenter, &buf[..size], Instant::now())
-                else {
+                let Some(data) = decode_datagram(&buf[..size]) else {
                     continue;
                 };
 
@@ -340,6 +281,19 @@ fn receive_loop(socket: UdpSocket) {
                 // observes the new sequence number.
                 ATOMIC_SAMPLE_SEQ.fetch_add(1, Ordering::Release);
 
+                // The one line that proves tracker data reached the mod, which is
+                // the first thing to establish when a user reports no head tracking.
+                if !first_packet_logged {
+                    first_packet_logged = true;
+                    log::info!(
+                        "First tracker packet from {}: yaw={:.2} pitch={:.2} roll={:.2}",
+                        sender,
+                        data.yaw,
+                        data.pitch,
+                        data.roll
+                    );
+                }
+
                 // Also update GLOBAL_STATE for legacy compatibility
                 // This is less frequent than reads, so RwLock overhead is acceptable
                 {
@@ -348,19 +302,15 @@ fn receive_loop(socket: UdpSocket) {
                     state.pitch = data.pitch;
                     state.roll = data.roll;
                 }
-
-                // Published after the pose, never before it: the recenter
-                // path captures whatever pose is current when it observes
-                // the request, and the pose this packet carries is the one
-                // the tracker just zeroed. Flagged first, a consumer that
-                // read the request in the gap centred on the PREVIOUS,
-                // pre-press pose and the view parked at that drift.
-                if pressed {
-                    RECENTER_REQUESTED.store(true, Ordering::Release);
-                }
             }
             Ok((size, _)) => {
-                log::warn!("Received packet with unexpected size: {} bytes", size);
+                if !bad_size_logged {
+                    bad_size_logged = true;
+                    log::warn!(
+                        "Received packet with unexpected size: {} bytes (logged once)",
+                        size
+                    );
+                }
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 // Timeout, no data available - this is normal
@@ -369,7 +319,13 @@ fn receive_loop(socket: UdpSocket) {
                 // Timeout, no data available - this is normal
             }
             Err(e) => {
-                log::error!("UDP receive error: {}", e);
+                // A sticky error (classically WSAECONNRESET) returns immediately with
+                // no sleep, so logging every occurrence would fill the log at CPU
+                // speed. Report each distinct error kind once, as the C# core does.
+                if last_logged_error_kind != Some(e.kind()) {
+                    last_logged_error_kind = Some(e.kind());
+                    log::error!("UDP receive error: {}", e);
+                }
             }
         }
     }
@@ -639,25 +595,14 @@ mod tests {
         assert!(approx_eq(received.roll, 7.25));
     }
 
-    #[test]
-    fn parses_headcam_recenter_trailer() {
-        let mut packet = [0u8; TRAILER_SIZE];
-        packet[48..52].copy_from_slice(TRAILER_MAGIC);
-        packet[52] = TRAILER_VERSION;
-        packet[53] = 7;
-
-        assert_eq!(parse_recenter_counter(&packet), Some(7));
-        assert_eq!(parse_recenter_counter(&packet[..PACKET_SIZE]), None);
-    }
-
-    /// Build a datagram with the given pose and, optionally, an HCAM
-    /// trailer carrying `counter`.
-    fn datagram(data: &OpenTrackData, trailer: Option<(u8, u8)>) -> Vec<u8> {
+    /// Build a datagram with the given pose and, optionally, a Headcam
+    /// trailer past it.
+    fn datagram(data: &OpenTrackData, trailer: bool) -> Vec<u8> {
         let mut packet = data.to_bytes().to_vec();
-        if let Some((version, counter)) = trailer {
-            packet.extend_from_slice(TRAILER_MAGIC);
-            packet.push(version);
-            packet.push(counter);
+        if trailer {
+            packet.extend_from_slice(b"HCAM");
+            packet.push(1);
+            packet.push(7);
         }
         packet
     }
@@ -674,137 +619,20 @@ mod tests {
     }
 
     #[test]
-    fn trailer_version_is_forward_compatible() {
-        let pose = level_pose();
-        assert_eq!(
-            parse_recenter_counter(&datagram(&pose, Some((2, 3)))),
-            Some(3),
-            "a newer trailer version must still yield its counter"
-        );
-        assert_eq!(
-            parse_recenter_counter(&datagram(&pose, Some((0, 3)))),
-            None,
-            "version 0 is not a valid trailer"
-        );
+    fn a_trailered_datagram_decodes_its_pose() {
+        let mut pose = level_pose();
+        pose.yaw = 12.5;
+
+        let data = decode_datagram(&datagram(&pose, true)).expect("trailered pose decodes");
+
+        assert!(approx_eq(data.yaw, 12.5));
     }
 
     #[test]
-    fn first_sighting_presses_and_repeats_do_not() {
-        let pose = level_pose();
-        let mut detector = RecenterDetector::new();
-        let now = Instant::now();
-
-        assert!(
-            detector.observe(&datagram(&pose, Some((TRAILER_VERSION, 4))), now),
-            "first trailer sighting is a press"
-        );
-        assert!(
-            !detector.observe(
-                &datagram(&pose, Some((TRAILER_VERSION, 4))),
-                now + Duration::from_millis(16)
-            ),
-            "the rest of the burst repeats the counter and is not a press"
-        );
-        assert!(
-            detector.observe(
-                &datagram(&pose, Some((TRAILER_VERSION, 5))),
-                now + Duration::from_millis(32)
-            ),
-            "a counter change is a press"
-        );
-        assert!(
-            !detector.observe(&datagram(&pose, None), now + Duration::from_millis(48)),
-            "a steady-state 48-byte packet is not a press"
-        );
-    }
-
-    #[test]
-    fn counter_wrap_is_a_press() {
-        let pose = level_pose();
-        let mut detector = RecenterDetector::new();
-        let now = Instant::now();
-
-        detector.observe(&datagram(&pose, Some((TRAILER_VERSION, 255))), now);
-        assert!(
-            detector.observe(
-                &datagram(&pose, Some((TRAILER_VERSION, 0))),
-                now + Duration::from_millis(16)
-            ),
-            "the counter wraps, so 255 -> 0 is a change and a press"
-        );
-    }
-
-    #[test]
-    fn wifi_stall_inside_a_burst_does_not_re_press() {
-        // A Wi-Fi loss burst mid-recenter-burst must not re-arm
-        // first-sighting: the burst's tail carries the SAME counter, and
-        // re-arming makes it read as a second press that recentres on
-        // whatever pose the head has drifted to since.
-        let pose = level_pose();
-        let mut detector = RecenterDetector::new();
-        let now = Instant::now();
-
-        assert!(detector.observe(&datagram(&pose, Some((TRAILER_VERSION, 9))), now));
-        assert!(
-            !detector.observe(
-                &datagram(&pose, Some((TRAILER_VERSION, 9))),
-                now + Duration::from_millis(900)
-            ),
-            "a 900ms stall is a dropped-packet burst, not a tracker restart"
-        );
-    }
-
-    #[test]
-    fn silence_re_arms_first_sighting() {
-        // A tracker app restart resets its counter, so after real silence
-        // the next trailer must be treated as a fresh first sighting even
-        // when it repeats the counter latched from the old session.
-        let pose = level_pose();
-        let mut detector = RecenterDetector::new();
-        let now = Instant::now();
-
-        assert!(detector.observe(&datagram(&pose, Some((TRAILER_VERSION, 9))), now));
-        assert!(
-            detector.observe(
-                &datagram(&pose, Some((TRAILER_VERSION, 9))),
-                now + RECENTER_REARM
-            ),
-            "packet silence past the re-arm window restores first-sighting"
-        );
-    }
-
-    #[test]
-    fn discarded_packet_discards_its_press() {
-        // A press only means "centre on the pose in this packet". If the
-        // packet is dropped, honouring the press would centre on the
-        // previous, pre-press pose instead.
+    fn a_non_finite_pose_is_dropped() {
         let mut nan_pose = level_pose();
         nan_pose.yaw = f64::NAN;
-        let mut detector = RecenterDetector::new();
 
-        assert!(
-            decode_datagram(
-                &mut detector,
-                &datagram(&nan_pose, Some((TRAILER_VERSION, 1))),
-                Instant::now()
-            )
-            .is_none(),
-            "a non-finite pose is dropped whole, press included"
-        );
-    }
-
-    #[test]
-    fn decoded_press_rides_the_zeroed_pose() {
-        let pose = level_pose();
-        let mut detector = RecenterDetector::new();
-        let (data, pressed) = decode_datagram(
-            &mut detector,
-            &datagram(&pose, Some((TRAILER_VERSION, 1))),
-            Instant::now(),
-        )
-        .expect("a finite pose with a trailer decodes");
-
-        assert!(pressed);
-        assert!(approx_eq(data.yaw, 0.0));
+        assert!(decode_datagram(&datagram(&nan_pose, true)).is_none());
     }
 }

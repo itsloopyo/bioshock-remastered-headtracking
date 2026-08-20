@@ -23,7 +23,7 @@
 //!
 //! State lives behind a `parking_lot::Mutex`. Engine_hook holds it for
 //! the duration of one `tick_frame` call; the hotkey thread holds it
-//! briefly on recenter to clear state. Contention is effectively zero
+//! briefly on toggle to clear state. Contention is effectively zero
 //! since both consumers run on different threads with very different
 //! cadences.
 
@@ -33,8 +33,8 @@ use std::time::Instant;
 use parking_lot::Mutex;
 
 use crate::tracking::{
-    get_recentered_position_atomic, get_recentered_rotation_atomic, ATOMIC_SAMPLE_SEQ,
-    ATOMIC_SMOOTHED_POSITION, ATOMIC_SMOOTHED_ROTATION,
+    get_position_atomic, get_rotation_atomic, ATOMIC_SAMPLE_SEQ, ATOMIC_SMOOTHED_POSITION,
+    ATOMIC_SMOOTHED_ROTATION,
 };
 
 const INTERVAL_BLEND: f64 = 0.3;
@@ -51,7 +51,7 @@ const INTERVAL_BLEND: f64 = 0.3;
 /// the extrapolation cap halfway through the sample period and sat 50%
 /// past the pose the tracker had reported for the rest of it. That is the
 /// first-second-of-session jolt native mods had and Unity mods did not, and
-/// it recurs after every recenter, because a recenter resets the estimate.
+/// it recurs whenever the estimate is reset.
 /// Guessing slow is safe (the segment lands short and the next sample
 /// corrects it); guessing fast overshoots.
 const DEFAULT_SAMPLE_INTERVAL: f64 = 1.0 / 30.0;
@@ -142,7 +142,7 @@ pub fn get_effective_smoothing(
 /// clipping through the player model behind them, and far less down than
 /// up for the same reason. `forward` is positive here: OpenTrack's `+Z`
 /// (away from the screen) is negated at the receiver boundary, in
-/// `get_recentered_position_atomic`.
+/// `get_position_atomic`.
 pub const POS_LIMIT_FORWARD_CM: f64 = 40.0;
 pub const POS_LIMIT_BACK_CM: f64 = 10.0;
 pub const POS_LIMIT_SIDE_CM: f64 = 30.0;
@@ -395,7 +395,7 @@ impl Pipeline {
         Self {
             // Yaw and roll wrap at the seam; pitch is asin-bounded to +/-90
             // and cannot. Order matches the tuples from
-            // get_recentered_rotation_atomic: yaw, pitch, roll.
+            // get_rotation_atomic: yaw, pitch, roll.
             rot: [
                 Interpolator::angular(),
                 Interpolator::linear(),
@@ -457,7 +457,7 @@ pub fn tick_frame() -> SmoothedPose {
         crate::opentrack::is_remote_connection(),
     );
 
-    let (raw_yaw, raw_pitch, raw_roll) = get_recentered_rotation_atomic();
+    let (raw_yaw, raw_pitch, raw_roll) = get_rotation_atomic();
     let iy = pipe.rot[0].update(raw_yaw, is_new, dt);
     let ip = pipe.rot[1].update(raw_pitch, is_new, dt);
     let ir = pipe.rot[2].update(raw_roll, is_new, dt);
@@ -466,7 +466,7 @@ pub fn tick_frame() -> SmoothedPose {
     let sr = pipe.rot_smooth[2].update(ir, smoothing, dt);
     ATOMIC_SMOOTHED_ROTATION.store(sy, sp, sr);
 
-    let (raw_x, raw_y_pos, raw_z) = get_recentered_position_atomic();
+    let (raw_x, raw_y_pos, raw_z) = get_position_atomic();
     let sx = pipe.pos[0].update(raw_x, is_new, dt, smoothing);
     let sy_pos = pipe.pos[1].update(raw_y_pos, is_new, dt, smoothing);
     let sz = pipe.pos[2].update(raw_z, is_new, dt, smoothing);
@@ -478,10 +478,8 @@ pub fn tick_frame() -> SmoothedPose {
     }
 }
 
-/// Reset all interpolation + smoothing state. Called from the recenter
-/// path so the new center doesn't lerp out from the old smoothed pose,
-/// and from the tracking-toggle so a long disabled period doesn't leave
-/// a giant dt waiting on the next tick.
+/// Reset all interpolation + smoothing state. Called from the tracking-toggle
+/// so a long disabled period doesn't leave a giant dt waiting on the next tick.
 pub fn reset() {
     let mut pipe = PIPELINE.lock();
     for i in 0..3 {

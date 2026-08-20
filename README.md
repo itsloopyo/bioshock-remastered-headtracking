@@ -65,7 +65,6 @@ Two equivalent binding sets - use whichever your keyboard has:
 
 | Action              | Nav-cluster | Chord           |
 |---------------------|-------------|-----------------|
-| Recenter            | `Home`      | `Ctrl+Shift+T`  |
 | Toggle tracking     | `End`       | `Ctrl+Shift+Y`  |
 | Cycle tracking mode | `Page Up`   | `Ctrl+Shift+G`  |
 | Toggle yaw mode     | `Page Down` | `Ctrl+Shift+H`  |
@@ -77,7 +76,11 @@ Two equivalent binding sets - use whichever your keyboard has:
 3. Rotational tracking disabled, positional tracking enabled
 4. Back to normal
 
-The chord letters T/Y/G sit in a vertical strip in the centre of
+There is no recenter key. Centre the view in your tracker app
+(OpenTrack's Center bind, or the CENTER button in a phone tracker) and
+the mod follows it.
+
+The chord letters Y/G/H sit in a vertical strip in the centre of
 the keyboard. `Ctrl+Shift+<letter>` is universally avoided by games,
 so the chord set works whether or not your keyboard has a nav
 cluster.
@@ -145,7 +148,14 @@ FOV manually:
 - Confirm your tracker is sending UDP to `127.0.0.1:4242` (or your
   PC's LAN IP if tracking from a phone).
 - Check the mod log at
-  `BioShock Remastered/Build/Final/bioshock_headtrack.log`.
+  `BioShock Remastered/Build/Final/bioshock_headtrack.log`. If the game
+  folder is not writable the mod writes it to `%TEMP%` instead, so check
+  there before concluding the mod did not load. It is rewritten on every
+  launch, so it only ever holds the most recent session - send it when
+  reporting a problem.
+- Look for `First tracker packet from ...` in that log. If it is absent,
+  no tracker packet ever reached the mod and the problem is upstream of
+  the game.
 
 **Game crashes on launch.**
 - `xinput1_3.dll` must be in `Build/Final/`, not the game root.

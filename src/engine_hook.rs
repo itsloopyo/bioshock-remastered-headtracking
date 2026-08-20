@@ -356,11 +356,6 @@ unsafe extern "thiscall" fn event_player_calc_view_detour(
         return;
     }
 
-    if crate::opentrack::try_consume_recenter_request() {
-        let mut state = crate::tracking::GLOBAL_STATE.write();
-        state.set_recenter();
-    }
-
     // Drive the per-axis interpolator + smoother once per frame. The
     // interpolator bridges low-rate trackers (60Hz phone) to the
     // display refresh rate so the camera advances every frame instead
