@@ -48,6 +48,12 @@ unsafe impl Sync for SendSyncModule {}
 /// Version of the mod
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Session log, written next to the game executable.
+const LOG_FILE_NAME: &str = "HeadTracking.log";
+
+/// Where the previous session's log is rotated to on startup.
+const PREV_LOG_FILE_NAME: &str = "HeadTracking.prev.log";
+
 /// Handle to the real xinput1_3.dll loaded from System32
 static REAL_XINPUT: OnceCell<SendSyncModule> = OnceCell::new();
 
@@ -183,24 +189,36 @@ fn initialize_mod() {
     install_d3d_hooks();
 }
 
-/// File logger setup. Falls back to `%TEMP%` if the working-directory
-/// log file can't be created (e.g. read-only Steam install).
+/// File logger setup. Writes `HeadTracking.log` next to the game
+/// executable - the name and location every CameraUnlock mod uses, so a
+/// user asked for "the log" finds the same file whichever mod they run.
 ///
-/// `File::create` truncates, so each launch starts a fresh log and a user
-/// sending one in is only ever sending the session they are reporting on.
+/// Each launch starts a fresh log: the outgoing one is rotated to
+/// `HeadTracking.prev.log` and the new one is truncated open. The log
+/// therefore covers one session and cannot grow across a hundred of
+/// them, while the session before the one being reported on is still
+/// on disk when a crash took the interesting lines with it.
 fn init_logging() {
     // Logging is a diagnostic convenience, not a functional requirement: head
     // tracking runs fine without a log. The release profile is `panic = "abort"`,
     // so panicking here (the old `.expect`) would take the whole game down just
     // because a log file could not be created. Degrade to no logging instead.
-    let file = std::fs::File::create("bioshock_headtrack.log").or_else(|_| {
-        std::fs::File::create(std::env::temp_dir().join("bioshock_headtrack.log"))
-    });
-    let file = match file {
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!("Head tracking: could not resolve the game executable path; no log written");
+        return;
+    };
+    let path = exe.with_file_name(LOG_FILE_NAME);
+
+    // Rotate rather than append. `fs::rename` replaces the destination on
+    // Windows, so the previous generation is overwritten, never accumulated.
+    let _ = std::fs::rename(&path, exe.with_file_name(PREV_LOG_FILE_NAME));
+
+    let file = match std::fs::File::create(&path) {
         Ok(f) => f,
         Err(e) => {
             eprintln!(
-                "Head tracking: could not create a log file ({e}); continuing without logging"
+                "Head tracking: could not create {} ({e}); continuing without logging",
+                path.display()
             );
             return;
         }

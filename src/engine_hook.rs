@@ -27,7 +27,7 @@
 //! `units = (degrees * 65536 / 360) as i32`.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use once_cell::sync::OnceCell;
@@ -81,6 +81,9 @@ type EventPlayerCalcViewFn = unsafe extern "thiscall" fn(
 );
 
 static ORIGINAL: OnceCell<EventPlayerCalcViewFn> = OnceCell::new();
+
+/// Latch for the one-shot "the detour is actually being called" log line.
+static FIRST_CALL_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Milliseconds-since-start of the most recent `eventPlayerCalcView`
 /// call. The D3D11 overlay uses its recency as the "we're in gameplay"
@@ -335,6 +338,15 @@ unsafe extern "thiscall" fn event_player_calc_view_detour(
 
     // Stamp the "gameplay is live" timestamp.
     LAST_PCV_MS.store(now_ms(), Ordering::Relaxed);
+
+    // "Hook installed" and "hook is being called" are different claims, and
+    // only the second one means the camera path is ours. One line, latched -
+    // this runs every frame.
+    if !FIRST_CALL_LOGGED.load(Ordering::Relaxed)
+        && !FIRST_CALL_LOGGED.swap(true, Ordering::Relaxed)
+    {
+        log::info!("eventPlayerCalcView detour is receiving calls - camera path is hooked");
+    }
 
     // Cache the PlayerController pointer for live FOV reads.
     if !this.is_null() {

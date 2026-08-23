@@ -13,7 +13,7 @@
          Users run install.cmd - it locates the game and deploys the DLL.
 
     2. BioshockRemasteredHeadTracking-v<ver>-nexus.zip
-         Build/Final/xinput1_3.dll
+         Build/Final/xinput1_3.dll, LICENSE, THIRD_PARTY_LICENSES.md.
          NexusMods-compatible: extract directly into the game folder.
 
     Assumes `pixi run build-release` has already produced the 32-bit DLL.
@@ -113,9 +113,11 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 foreach ($s in @('install.cmd', 'uninstall.cmd')) {
     Copy-Item -Path (Join-Path $scriptDir $s) -Destination $installerStaging -Force
 }
+# LICENSE and THIRD_PARTY_LICENSES.md are not optional: the DLL statically
+# links MinHook, HDE and the MIT crates, whose licenses require the notice to
+# travel with the binary. Copy-Item throws if one is missing.
 foreach ($doc in @('README.md', 'LICENSE', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.md')) {
-    $p = Join-Path $projectRoot $doc
-    if (Test-Path $p) { Copy-Item -Path $p -Destination $installerStaging -Force }
+    Copy-Item -Path (Join-Path $projectRoot $doc) -Destination $installerStaging -Force
 }
 
 Import-Module (Join-Path $projectRoot 'cameraunlock-core\powershell\ReleaseWorkflow.psm1') -Force
@@ -133,8 +135,35 @@ $nexusDllDir = Join-Path $nexusStaging 'Build\Final'
 New-Item -ItemType Directory -Path $nexusDllDir -Force | Out-Null
 Copy-Item -Path $builtDll -Destination (Join-Path $nexusDllDir 'xinput1_3.dll') -Force
 
+# MIT and BSD-2-Clause both require the copyright notice to accompany a binary
+# redistribution, and the DLL statically links MinHook, HDE and the MIT crates.
+# The notices must ship in this ZIP too, not only in the installer one.
+foreach ($doc in @('LICENSE', 'THIRD_PARTY_LICENSES.md')) {
+    Copy-Item -Path (Join-Path $projectRoot $doc) -Destination $nexusStaging -Force
+}
+
 $nexusZip = New-ZipFromStaging -Name "$modName-v$version-nexus.zip" -StagingDir $nexusStaging
 Remove-Item $nexusStaging -Recurse -Force
+
+# --- License-notice gate ----------------------------------------------
+# Both ZIPs redistribute the DLL, which statically links MinHook (BSD-2),
+# HDE (BSD-2) and a set of MIT crates. All three license families require the
+# notice to accompany the binary, so a ZIP that lost it must not ship.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+foreach ($zipPath in @($installerZip, $nexusZip)) {
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        $names = $zip.Entries.Name
+    } finally {
+        $zip.Dispose()
+    }
+    foreach ($required in @('LICENSE', 'THIRD_PARTY_LICENSES.md')) {
+        if ($names -notcontains $required) {
+            throw "$(Split-Path -Leaf $zipPath) is missing $required - it redistributes the DLL, so the notices must travel with it."
+        }
+    }
+}
+Write-Host '  license notices present in both ZIPs' -ForegroundColor Green
 
 Write-Host ''
 Write-Host 'Done.' -ForegroundColor Green

@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["itsloopyo / CameraUnlock"]
 description = "Decoupled look+aim head tracking mod for BioShock Remastered via OpenTrack UDP. Part of the CameraUnlock project."
 license = "MIT"
-repository = "https://github.com/itsloopyo/bioshock-remastered"
+repository = "https://github.com/itsloopyo/bioshock-remastered-headtracking"
 readme = "README.md"
 
 [lib]

@@ -32,7 +32,7 @@ $result = Invoke-DevDeployShim `
     -ModDllName 'xinput1_3.dll' `
     -SourceDllName 'bioshock_headtrack.dll' `
     -ExtraDlls @() `
-    -ShimMarker 'bioshock_headtrack.log' `
+    -ShimMarker 'BioShock Head Tracking v' `
     -GivenPath $GivenPath
 
 Write-DeploymentSuccess `

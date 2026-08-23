@@ -2,6 +2,9 @@
 
 ![Mod GIF](https://raw.githubusercontent.com/itsloopyo/bioshock-remastered-headtracking/main/assets/readme-clip.gif)
 
+<sub>Gameplay footage of BioShock Remastered, (c) 2K Games / Irrational Games /
+Blind Squirrel Entertainment, shown to demonstrate what the mod does.</sub>
+
 Decoupled look+aim head tracking for BioShock Remastered. Your head moves
 the view; the mouse still controls aim.
 
@@ -25,7 +28,7 @@ the view; the mouse still controls aim.
 ## Installation
 
 1. Download the latest `BioshockRemasteredHeadTracking-v<version>-installer.zip`
-   from [Releases](https://github.com/itsloopyo/bioshock-remastered/releases).
+   from [Releases](https://github.com/itsloopyo/bioshock-remastered-headtracking/releases).
 2. Extract anywhere.
 3. Run `install.cmd` - it auto-detects your Steam install and copies
    `xinput1_3.dll` into `BioShock Remastered/Build/Final/`.
@@ -148,14 +151,17 @@ FOV manually:
 - Confirm your tracker is sending UDP to `127.0.0.1:4242` (or your
   PC's LAN IP if tracking from a phone).
 - Check the mod log at
-  `BioShock Remastered/Build/Final/bioshock_headtrack.log`. If the game
-  folder is not writable the mod writes it to `%TEMP%` instead, so check
-  there before concluding the mod did not load. It is rewritten on every
-  launch, so it only ever holds the most recent session - send it when
-  reporting a problem.
+  `BioShock Remastered/Build/Final/HeadTracking.log`. It is rewritten on
+  every launch, so it only ever holds the most recent session - send it
+  when reporting a problem. The session before it is kept alongside as
+  `HeadTracking.prev.log`, which is the one to send if the game crashed.
 - Look for `First tracker packet from ...` in that log. If it is absent,
   no tracker packet ever reached the mod and the problem is upstream of
   the game.
+- Look for `eventPlayerCalcView detour is receiving calls`. If the hook
+  installed but that line never appears, the mod loaded without ever
+  getting the camera - include the log so we can see which build you are
+  on.
 
 **Game crashes on launch.**
 - `xinput1_3.dll` must be in `Build/Final/`, not the game root.
@@ -205,7 +211,30 @@ release ZIPs.
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE). Third-party components compiled into the
+DLL are listed with their notices in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
+## Legal
+
+This is an unofficial, non-commercial fan modification. It is not
+affiliated with, endorsed by, or sponsored by 2K Games, Take-Two
+Interactive, Irrational Games, or Blind Squirrel Entertainment.
+"BioShock" and all related names, logos, and marks are trademarks of
+their respective owners and are used here only to identify the game the
+mod applies to.
+
+The mod contains no game code, assets, or data. It ships a single DLL of
+original work that hooks the running game in memory, and it requires a
+legitimately purchased copy of BioShock Remastered. It defeats no copy
+protection and includes no part of the game or of Microsoft's XInput
+runtime, which it loads from your own Windows installation.
+
+The clip at the top of this page is a short piece of BioShock Remastered
+gameplay footage, copyright its respective owners, included solely to
+demonstrate what the mod does. No claim of ownership is made over it. If
+a rights holder would prefer it removed, open an issue and it comes
+down.
 
 ## Credits
 

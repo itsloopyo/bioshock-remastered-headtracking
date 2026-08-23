@@ -5,8 +5,8 @@
 //! - `is_memory_valid` is the read-permission probe the engine hook
 //!   uses before dereferencing candidate camera pointers.
 //! - `find_player_calc_view_target` resolves the address of the UE2.5
-//!   `eventPlayerCalcView` thunk via the FName-chain method documented
-//!   in the project's CLAUDE.md.
+//!   `eventPlayerCalcView` thunk by locating the engine's FName entry
+//!   for it and walking the chain to the native thunk.
 
 use std::ffi::c_void;
 
@@ -217,12 +217,37 @@ fn find_fname_index_global(base: usize, size: usize, xref: usize) -> Option<usiz
 /// Returns the first plausible function start, or `None` if any stage
 /// fails. Safer to not install a hook than to guess.
 pub fn find_player_calc_view_target(scanner: &MemoryScanner) -> Option<usize> {
-    let str_addr = scanner
+    // Each stage names itself on failure. This scan is the single point the
+    // whole camera path hangs off, and "could not locate eventPlayerCalcView"
+    // on its own does not say whether the game is a build we have never seen,
+    // a repack, or a working scan that fell over on the last step.
+    let Some(str_addr) = scanner
         .find_wide_string("PlayerCalcView")
         .into_iter()
-        .next()?;
-    let init_xref = scanner.find_references(str_addr).into_iter().next()?;
-    let name_global = find_fname_index_global(scanner.base(), scanner.size(), init_xref)?;
+        .next()
+    else {
+        log::error!(
+            "PCV discovery: wide string \"PlayerCalcView\" not found in module 0x{:08X}+0x{:X}",
+            scanner.base(),
+            scanner.size()
+        );
+        return None;
+    };
+    let Some(init_xref) = scanner.find_references(str_addr).into_iter().next() else {
+        log::error!(
+            "PCV discovery: no xref to the \"PlayerCalcView\" string at 0x{:08X}",
+            str_addr
+        );
+        return None;
+    };
+    let Some(name_global) = find_fname_index_global(scanner.base(), scanner.size(), init_xref)
+    else {
+        log::error!(
+            "PCV discovery: no FName index global after the init xref at 0x{:08X}",
+            init_xref
+        );
+        return None;
+    };
     for xref in scanner.find_references(name_global) {
         // Skip init-block writes - they sit within ~200 bytes of the
         // string xref because the whole name table lives in one
@@ -234,5 +259,9 @@ pub fn find_player_calc_view_target(scanner: &MemoryScanner) -> Option<usize> {
             return Some(fn_start);
         }
     }
+    log::error!(
+        "PCV discovery: no dispatch site with an MSVC prologue among the xrefs to NAME_PlayerCalcView.Index (0x{:08X})",
+        name_global
+    );
     None
 }
