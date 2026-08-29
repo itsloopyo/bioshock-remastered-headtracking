@@ -1,12 +1,11 @@
 # BioShock Remastered Head Tracking
 
-![Mod GIF](https://raw.githubusercontent.com/itsloopyo/bioshock-remastered-headtracking/main/assets/readme-clip.gif)
+![BioShock Remastered running with this mod](https://raw.githubusercontent.com/itsloopyo/bioshock-remastered-headtracking/main/assets/readme-clip.gif)
 
 <sub>Gameplay footage of BioShock Remastered, (c) 2K Games / Irrational Games /
 Blind Squirrel Entertainment, shown to demonstrate what the mod does.</sub>
 
-Decoupled look+aim head tracking for BioShock Remastered. Your head moves
-the view; the mouse still controls aim.
+An unofficial head tracking mod for BioShock Remastered that moves the view with your head while your mouse or controller keeps aiming, driven by a webcam, phone, or any OpenTrack compatible tracker, with no VR headset required.
 
 ## Features
 
@@ -213,7 +212,7 @@ release ZIPs.
 
 MIT - see [LICENSE](LICENSE). Third-party components compiled into the
 DLL are listed with their notices in
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Legal
 

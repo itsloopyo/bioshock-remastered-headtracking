@@ -9,11 +9,11 @@
 
     1. BioshockRemasteredHeadTracking-v<ver>-installer.zip
          install.cmd, uninstall.cmd, plugins/xinput1_3.dll, README.md,
-         LICENSE, CHANGELOG.md, THIRD_PARTY_LICENSES.md.
+         LICENSE, CHANGELOG.md, THIRD-PARTY-NOTICES.md.
          Users run install.cmd - it locates the game and deploys the DLL.
 
     2. BioshockRemasteredHeadTracking-v<ver>-nexus.zip
-         Build/Final/xinput1_3.dll, LICENSE, THIRD_PARTY_LICENSES.md.
+         Build/Final/xinput1_3.dll, LICENSE, THIRD-PARTY-NOTICES.md.
          NexusMods-compatible: extract directly into the game folder.
 
     Assumes `pixi run build-release` has already produced the 32-bit DLL.
@@ -113,10 +113,10 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 foreach ($s in @('install.cmd', 'uninstall.cmd')) {
     Copy-Item -Path (Join-Path $scriptDir $s) -Destination $installerStaging -Force
 }
-# LICENSE and THIRD_PARTY_LICENSES.md are not optional: the DLL statically
+# LICENSE and THIRD-PARTY-NOTICES.md are not optional: the DLL statically
 # links MinHook, HDE and the MIT crates, whose licenses require the notice to
 # travel with the binary. Copy-Item throws if one is missing.
-foreach ($doc in @('README.md', 'LICENSE', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.md')) {
+foreach ($doc in @('README.md', 'LICENSE', 'CHANGELOG.md', 'THIRD-PARTY-NOTICES.md')) {
     Copy-Item -Path (Join-Path $projectRoot $doc) -Destination $installerStaging -Force
 }
 
@@ -138,7 +138,7 @@ Copy-Item -Path $builtDll -Destination (Join-Path $nexusDllDir 'xinput1_3.dll') 
 # MIT and BSD-2-Clause both require the copyright notice to accompany a binary
 # redistribution, and the DLL statically links MinHook, HDE and the MIT crates.
 # The notices must ship in this ZIP too, not only in the installer one.
-foreach ($doc in @('LICENSE', 'THIRD_PARTY_LICENSES.md')) {
+foreach ($doc in @('LICENSE', 'THIRD-PARTY-NOTICES.md')) {
     Copy-Item -Path (Join-Path $projectRoot $doc) -Destination $nexusStaging -Force
 }
 
@@ -157,7 +157,7 @@ foreach ($zipPath in @($installerZip, $nexusZip)) {
     } finally {
         $zip.Dispose()
     }
-    foreach ($required in @('LICENSE', 'THIRD_PARTY_LICENSES.md')) {
+    foreach ($required in @('LICENSE', 'THIRD-PARTY-NOTICES.md')) {
         if ($names -notcontains $required) {
             throw "$(Split-Path -Leaf $zipPath) is missing $required - it redistributes the DLL, so the notices must travel with it."
         }
