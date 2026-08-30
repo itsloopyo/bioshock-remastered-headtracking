@@ -96,7 +96,7 @@ impl OpenTrackData {
         }
     }
 
-    /// True only when every field is a finite number.
+    /// True only when every field is finite AS AN f32.
     ///
     /// The receiver binds `0.0.0.0`, so any host on the network (or a
     /// glitching tracker) can deliver a datagram. A single non-finite value
@@ -105,13 +105,25 @@ impl OpenTrackData {
     /// tracking toggle resets the pipeline. Non-finite tracking data is
     /// never legitimate, so we drop the packet at the boundary rather than
     /// let it poison state.
+    ///
+    /// Checking the f64 alone is not enough, and this is the band that gets
+    /// missed: a finite f64 can exceed the f32 range - 1e300 is an ordinary
+    /// double - and `engine_hook` narrows to f32 to write the engine's
+    /// `FVector`, where that value becomes an infinity written straight into
+    /// game memory with nothing left to catch it. Gating on the NARROWED value
+    /// closes the band. Matches `FiniteFloat` in the core's
+    /// `cpp/src/protocol/opentrack_packet.cpp`.
     pub fn is_finite(&self) -> bool {
-        self.x.is_finite()
-            && self.y.is_finite()
-            && self.z.is_finite()
-            && self.yaw.is_finite()
-            && self.pitch.is_finite()
-            && self.roll.is_finite()
+        fn finite_as_f32(v: f64) -> bool {
+            (v as f32).is_finite()
+        }
+
+        finite_as_f32(self.x)
+            && finite_as_f32(self.y)
+            && finite_as_f32(self.z)
+            && finite_as_f32(self.yaw)
+            && finite_as_f32(self.pitch)
+            && finite_as_f32(self.roll)
     }
 
     /// Create a 48-byte packet from OpenTrackData
@@ -140,7 +152,7 @@ static NON_FINITE_LOGGED: AtomicBool = AtomicBool::new(false);
 ///
 /// Only the first 48 bytes are read: a Headcam datagram carries a trailer
 /// past the pose, and this mod has nothing to do with it.
-fn decode_datagram(datagram: &[u8]) -> Option<OpenTrackData> {
+pub(crate) fn decode_datagram(datagram: &[u8]) -> Option<OpenTrackData> {
     let packet: &[u8; PACKET_SIZE] = datagram[..PACKET_SIZE].try_into().unwrap();
     let data = OpenTrackData::from_bytes(packet);
 
@@ -493,6 +505,47 @@ mod tests {
             roll: 15.0,
         };
         assert!(data.is_finite());
+    }
+
+    #[test]
+    fn is_finite_rejects_a_finite_double_that_overflows_f32() {
+        // The band a plain f64 check misses. 1e300 is an ordinary double and
+        // `f64::is_finite` says yes, but `engine_hook` narrows to f32 to write
+        // the engine's FVector and the value becomes an infinity in game memory
+        // with nothing downstream to catch it. The socket binds 0.0.0.0, so any
+        // host on the network can send this.
+        let base = OpenTrackData {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+        };
+        for field in 0..6 {
+            let mut d = base;
+            match field {
+                0 => d.x = 1e300,
+                1 => d.y = 1e300,
+                2 => d.z = 1e300,
+                3 => d.yaw = 1e300,
+                4 => d.pitch = 1e300,
+                _ => d.roll = 1e300,
+            }
+            assert!(
+                d.x.is_finite()
+                    && d.y.is_finite()
+                    && d.z.is_finite()
+                    && d.yaw.is_finite()
+                    && d.pitch.is_finite()
+                    && d.roll.is_finite(),
+                "1e300 is a finite f64 - that is the whole point of the test"
+            );
+            assert!(
+                !d.is_finite(),
+                "field {field} at 1e300 passed validation and becomes f32::INFINITY downstream"
+            );
+        }
     }
 
     #[test]

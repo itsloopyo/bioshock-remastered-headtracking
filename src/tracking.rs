@@ -320,6 +320,13 @@ pub fn set_gameplay_active_atomic(active: bool) {
     ATOMIC_GAMEPLAY_ACTIVE.store(active, Ordering::Release);
 }
 
+/// Serialises the tests that drive the process-global tracking atomics and the
+/// smoothing pipeline. `cargo test` runs test functions on parallel threads and
+/// these statics are shared, so a test that stores a pose and then asserts on it
+/// is otherwise racing every other test that writes one.
+#[cfg(test)]
+pub(crate) static GLOBAL_ATOMICS_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Update rotation values atomically (called by UDP receiver)
 #[inline(always)]
 pub fn update_rotation_atomic(yaw: f64, pitch: f64, roll: f64) {
@@ -558,6 +565,7 @@ mod tests {
 
     #[test]
     fn test_global_atomic_rotation() {
+        let _guard = GLOBAL_ATOMICS_TEST_LOCK.lock();
         // Test the global ATOMIC_ROTATION static
         update_rotation_atomic(90.0, 45.0, 22.5);
 
@@ -598,6 +606,8 @@ mod tests {
     #[test]
     fn test_atomic_rotation_thread_safety() {
         use std::thread;
+
+        let _guard = GLOBAL_ATOMICS_TEST_LOCK.lock();
 
         // Spawn multiple writers
         let handles: Vec<_> = (0..4)

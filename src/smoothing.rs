@@ -87,8 +87,14 @@ const EXTRAPOLATION_DECAY: f64 = 0.35;
 /// HOLDING parks the output at 1.5x the last reported pose forever
 /// whenever samples stop arriving - a tracker app streaming its last
 /// value while the face is lost, or a head so still that consecutive
-/// samples are bit-identical and never bump the sample sequence. A 25
-/// degree head turn then renders as 37.5 degrees and stays there.
+/// samples are bit-identical and the duplicate filter in `tick_frame`
+/// suppresses them. A 25 degree head turn then renders as 37.5 degrees
+/// and stays there.
+///
+/// (The sample sequence itself is bumped for every accepted datagram,
+/// duplicates included - it carries the Release/Acquire pairing that
+/// publishes the value writes. Deciding what is a new SAMPLE is the
+/// consumer's job, which is where the filter lives.)
 ///
 /// So the prediction expires, but on a WALL CLOCK rather than on
 /// progress: progress is measured in units of an estimated sample
@@ -205,7 +211,7 @@ impl AxisKind {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Interpolator {
+pub(crate) struct Interpolator {
     kind: AxisKind,
     from: f64,
     to: f64,
@@ -230,11 +236,11 @@ impl Interpolator {
         }
     }
 
-    const fn angular() -> Self {
+    pub(crate) const fn angular() -> Self {
         Self::new(AxisKind::Angular)
     }
 
-    const fn linear() -> Self {
+    pub(crate) const fn linear() -> Self {
         Self::new(AxisKind::Linear)
     }
 
@@ -242,7 +248,7 @@ impl Interpolator {
         *self = Self::new(self.kind);
     }
 
-    fn update(&mut self, raw: f64, is_new_sample: bool, dt: f64) -> f64 {
+    pub(crate) fn update(&mut self, raw: f64, is_new_sample: bool, dt: f64) -> f64 {
         self.time_since_last_sample += dt;
 
         if is_new_sample {
@@ -291,7 +297,7 @@ impl Interpolator {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Smoother {
+pub(crate) struct Smoother {
     kind: AxisKind,
     current: f64,
     has_value: bool,
@@ -306,11 +312,11 @@ impl Smoother {
         }
     }
 
-    const fn angular() -> Self {
+    pub(crate) const fn angular() -> Self {
         Self::new(AxisKind::Angular)
     }
 
-    const fn linear() -> Self {
+    pub(crate) const fn linear() -> Self {
         Self::new(AxisKind::Linear)
     }
 
@@ -322,7 +328,7 @@ impl Smoother {
     /// just in the interpolator. Matches `SmoothAngle` in the core's
     /// `smoothing_utils.h`, which the core's TrackingProcessor uses for yaw
     /// and roll while pitch uses the plain scalar `Smooth`.
-    fn update(&mut self, target: f64, smoothing: f64, dt: f64) -> f64 {
+    pub(crate) fn update(&mut self, target: f64, smoothing: f64, dt: f64) -> f64 {
         if !self.has_value {
             self.current = target;
             self.has_value = true;
@@ -388,6 +394,13 @@ struct Pipeline {
     pos: [PositionAxis; 3],
     last_frame: Option<Instant>,
     last_seen_seq: u64,
+    /// Raw values carried by the last datagram, for the duplicate filter in
+    /// `tick_frame`. `None` until the first one arrives, so a tracker whose
+    /// very first sample is all zeroes still seeds the interpolators.
+    /// Rotation and position are tracked separately because either can
+    /// repeat while the other moves.
+    last_raw_rot: Option<(f64, f64, f64)>,
+    last_raw_pos: Option<(f64, f64, f64)>,
 }
 
 impl Pipeline {
@@ -409,6 +422,8 @@ impl Pipeline {
             ],
             last_frame: None,
             last_seen_seq: 0,
+            last_raw_rot: None,
+            last_raw_pos: None,
         }
     }
 }
@@ -435,17 +450,30 @@ pub struct SmoothedPose {
 /// interpolator progress by the wall-clock dt since the previous call,
 /// so total progress across N calls equals one frame.
 pub fn tick_frame() -> SmoothedPose {
+    let now = Instant::now();
+    let dt = {
+        let mut pipe = PIPELINE.lock();
+        let dt = match pipe.last_frame {
+            Some(prev) => (now - prev).as_secs_f64().clamp(MIN_FRAME_DT, MAX_FRAME_DT),
+            None => FIRST_FRAME_DT,
+        };
+        pipe.last_frame = Some(now);
+        dt
+    };
+    tick_with_dt(dt)
+}
+
+/// The frame itself, with the wall clock already resolved to a `dt`.
+///
+/// Split out so the pipeline can be driven from a script at a chosen frame rate,
+/// which is what the shared conformance vectors in `cameraunlock-core` do. The
+/// duplicate-sample filter below is the kind of defect that survives precisely
+/// because the only entry point reads `Instant::now()`.
+pub(crate) fn tick_with_dt(dt: f64) -> SmoothedPose {
     let mut pipe = PIPELINE.lock();
 
-    let now = Instant::now();
-    let dt = match pipe.last_frame {
-        Some(prev) => (now - prev).as_secs_f64().clamp(MIN_FRAME_DT, MAX_FRAME_DT),
-        None => FIRST_FRAME_DT,
-    };
-    pipe.last_frame = Some(now);
-
     let seq = ATOMIC_SAMPLE_SEQ.load(Ordering::Acquire);
-    let is_new = seq != pipe.last_seen_seq;
+    let is_new_packet = seq != pipe.last_seen_seq;
     pipe.last_seen_seq = seq;
 
     // Re-read the connection locality every frame so switching between a
@@ -457,19 +485,42 @@ pub fn tick_frame() -> SmoothedPose {
         crate::opentrack::is_remote_connection(),
     );
 
-    let (raw_yaw, raw_pitch, raw_roll) = get_rotation_atomic();
-    let iy = pipe.rot[0].update(raw_yaw, is_new, dt);
-    let ip = pipe.rot[1].update(raw_pitch, is_new, dt);
-    let ir = pipe.rot[2].update(raw_roll, is_new, dt);
+    let raw_rot = get_rotation_atomic();
+    let raw_pos = get_position_atomic();
+
+    // A new PACKET is not a new SAMPLE. OpenTrack relays at ~250 Hz whatever
+    // the source rate is, and a phone app resends its last value rather than
+    // going quiet, so the sequence counter alone reports a fresh sample on
+    // every datagram. The interval EMA then collapses to the packet interval:
+    // each segment finishes within a frame or two of the sample that started
+    // it and the inter-sample frames the interpolator exists to generate
+    // collapse into flat spots, which is the stepped output it was added to
+    // remove. Worse, `Interpolator::update` resets `time_since_last_sample` on
+    // every one of them, so the wall-clock extrapolation expiry never engages
+    // for the two cases it was written for - a tracker streaming its last
+    // value while the face is lost, and a head held still.
+    //
+    // Compare the VALUES, exactly as `HeadTrackingSession` does in the core.
+    let is_new_rot = is_new_packet && pipe.last_raw_rot != Some(raw_rot);
+    let is_new_pos = is_new_packet && pipe.last_raw_pos != Some(raw_pos);
+    if is_new_packet {
+        pipe.last_raw_rot = Some(raw_rot);
+        pipe.last_raw_pos = Some(raw_pos);
+    }
+
+    let (raw_yaw, raw_pitch, raw_roll) = raw_rot;
+    let iy = pipe.rot[0].update(raw_yaw, is_new_rot, dt);
+    let ip = pipe.rot[1].update(raw_pitch, is_new_rot, dt);
+    let ir = pipe.rot[2].update(raw_roll, is_new_rot, dt);
     let sy = pipe.rot_smooth[0].update(iy, smoothing, dt);
     let sp = pipe.rot_smooth[1].update(ip, smoothing, dt);
     let sr = pipe.rot_smooth[2].update(ir, smoothing, dt);
     ATOMIC_SMOOTHED_ROTATION.store(sy, sp, sr);
 
-    let (raw_x, raw_y_pos, raw_z) = get_position_atomic();
-    let sx = pipe.pos[0].update(raw_x, is_new, dt, smoothing);
-    let sy_pos = pipe.pos[1].update(raw_y_pos, is_new, dt, smoothing);
-    let sz = pipe.pos[2].update(raw_z, is_new, dt, smoothing);
+    let (raw_x, raw_y_pos, raw_z) = raw_pos;
+    let sx = pipe.pos[0].update(raw_x, is_new_pos, dt, smoothing);
+    let sy_pos = pipe.pos[1].update(raw_y_pos, is_new_pos, dt, smoothing);
+    let sz = pipe.pos[2].update(raw_z, is_new_pos, dt, smoothing);
     ATOMIC_SMOOTHED_POSITION.store(sx, sy_pos, sz);
 
     SmoothedPose {
@@ -489,6 +540,8 @@ pub fn reset() {
     }
     pipe.last_frame = None;
     pipe.last_seen_seq = 0;
+    pipe.last_raw_rot = None;
+    pipe.last_raw_pos = None;
 }
 
 #[cfg(test)]
@@ -804,6 +857,102 @@ mod tests {
             out < POS_LIMIT_FORWARD_CM - 1.0,
             "smoothing state wound up outside the limit and pinned the output: {}",
             out
+        );
+    }
+
+    #[test]
+    fn duplicate_datagrams_are_not_new_samples() {
+        let _guard = crate::tracking::GLOBAL_ATOMICS_TEST_LOCK.lock();
+        // OpenTrack relays at ~250Hz whatever the source rate is, and a phone
+        // app resends its last value rather than going quiet, so the sample
+        // sequence advances on datagrams that carry nothing new. Treating those
+        // as samples collapses the interval EMA onto the packet rate and, worse,
+        // resets time_since_last_sample every frame - so the wall-clock
+        // extrapolation expiry never engages for a tracker streaming a stale
+        // value, which is one of the two cases it exists for.
+        reset();
+        crate::tracking::update_rotation_atomic(10.0, 0.0, 0.0);
+        crate::tracking::ATOMIC_SAMPLE_SEQ.fetch_add(1, Ordering::Release);
+        tick_with_dt(1.0 / 60.0);
+
+        // 60 further datagrams, all carrying the identical pose. One second of
+        // wall clock, well past HOLD + DECAY.
+        for _ in 0..60 {
+            crate::tracking::update_rotation_atomic(10.0, 0.0, 0.0);
+            crate::tracking::ATOMIC_SAMPLE_SEQ.fetch_add(1, Ordering::Release);
+            tick_with_dt(1.0 / 60.0);
+        }
+
+        let elapsed = {
+            let pipe = PIPELINE.lock();
+            pipe.rot[0].time_since_last_sample
+        };
+        assert!(
+            elapsed > 0.9,
+            "duplicate datagrams kept resetting the stall clock: {elapsed}"
+        );
+    }
+
+    #[test]
+    fn a_changed_value_is_a_new_sample() {
+        let _guard = crate::tracking::GLOBAL_ATOMICS_TEST_LOCK.lock();
+        // The other half: the filter must not swallow real movement.
+        reset();
+        crate::tracking::update_rotation_atomic(10.0, 0.0, 0.0);
+        crate::tracking::ATOMIC_SAMPLE_SEQ.fetch_add(1, Ordering::Release);
+        tick_with_dt(1.0 / 60.0);
+
+        crate::tracking::update_rotation_atomic(20.0, 0.0, 0.0);
+        crate::tracking::ATOMIC_SAMPLE_SEQ.fetch_add(1, Ordering::Release);
+        tick_with_dt(1.0 / 60.0);
+
+        let (to, elapsed) = {
+            let pipe = PIPELINE.lock();
+            (pipe.rot[0].to, pipe.rot[0].time_since_last_sample)
+        };
+        assert!(
+            (to - 20.0).abs() < 1e-9,
+            "new value never became the target"
+        );
+        assert!(
+            elapsed < 1e-9,
+            "new sample did not reset the stall clock: {elapsed}"
+        );
+    }
+
+    #[test]
+    fn position_duplicates_are_filtered_independently_of_rotation() {
+        let _guard = crate::tracking::GLOBAL_ATOMICS_TEST_LOCK.lock();
+        // A head that is turning while holding still, or the reverse. Gating one
+        // channel on the other's movement re-introduces the defect on whichever
+        // channel is quiet.
+        reset();
+        crate::tracking::update_rotation_atomic(0.0, 0.0, 0.0);
+        crate::tracking::update_position_atomic(5.0, 0.0, 0.0);
+        crate::tracking::ATOMIC_SAMPLE_SEQ.fetch_add(1, Ordering::Release);
+        tick_with_dt(1.0 / 60.0);
+
+        for i in 1..=30 {
+            crate::tracking::update_rotation_atomic(f64::from(i), 0.0, 0.0);
+            crate::tracking::update_position_atomic(5.0, 0.0, 0.0);
+            crate::tracking::ATOMIC_SAMPLE_SEQ.fetch_add(1, Ordering::Release);
+            tick_with_dt(1.0 / 60.0);
+        }
+
+        let (rot_elapsed, pos_elapsed) = {
+            let pipe = PIPELINE.lock();
+            (
+                pipe.rot[0].time_since_last_sample,
+                pipe.pos[0].interp.time_since_last_sample,
+            )
+        };
+        assert!(
+            rot_elapsed < 1e-9,
+            "rotation was moving every frame but its stall clock ran: {rot_elapsed}"
+        );
+        assert!(
+            pos_elapsed > 0.4,
+            "position was unchanged for half a second but its stall clock was reset: {pos_elapsed}"
         );
     }
 

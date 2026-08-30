@@ -10,7 +10,10 @@ readme = "README.md"
 
 [lib]
 name = "bioshock_headtrack"
-crate-type = ["cdylib"]
+# rlib alongside the cdylib so `src/bin/conformance_harness.rs` - a separate
+# crate by construction - can link the pipeline. The shipped artifact is still
+# the cdylib; the rlib is a build-tree file.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 parking_lot = "0.12.3"

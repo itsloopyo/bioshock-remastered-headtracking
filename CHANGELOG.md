@@ -21,12 +21,32 @@
 
 ### Added
 
+- The shared pipeline conformance vectors from `cameraunlock-core` now run as
+  part of `pixi run test`. The vectors, the constants and the assertions all live
+  in the core; this repo supplies only the executor that drives its pipeline
+  through them, and it says out loud which vectors it cannot run rather than
+  reporting a pass for a test that never happened.
 - A `First tracker packet from ...` line in the log. Nothing previously recorded
   that tracker data had arrived, so a log from a misconfigured tracker looked
   identical to a healthy one.
 
 ### Fixed
 
+- Head tracking stepped at the tracker's rate instead of interpolating between
+  samples whenever the sender repeated a value. OpenTrack relays at ~250Hz
+  regardless of the source rate and phone trackers resend the last pose rather
+  than going quiet, and the pipeline treated every datagram as a fresh sample: the
+  sample-interval estimate collapsed onto the packet interval, so each segment
+  finished within a frame or two and the in-between frames the interpolator exists
+  to generate went flat. It also reset the stall clock on every repeat, so the
+  extrapolation never expired for a tracker streaming a stale pose - one of the two
+  cases that expiry was written for. Rotation and position now each compare the
+  values, not just the packet counter.
+- A datagram whose fields were finite doubles but outside the range of a 32-bit
+  float, such as `1e300`, passed validation and became an infinity when the engine
+  hook narrowed it to write the game's `FVector`. The socket binds `0.0.0.0`, so
+  any host on the network could send one. Validation now gates on the narrowed
+  value.
 - The mod no longer aborts the game when it cannot create its log file. Under
   `panic = "abort"` the old `.expect` took the whole process down over a
   diagnostic file; it now continues without logging.

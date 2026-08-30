@@ -18,6 +18,7 @@
 #![allow(clippy::missing_safety_doc, clippy::missing_transmute_annotations)]
 
 mod config;
+pub mod conformance;
 mod d3d;
 mod engine_hook;
 mod hook_util;
