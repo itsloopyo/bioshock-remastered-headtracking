@@ -181,7 +181,7 @@ text is reproduced below. The Nexus ZIP carries no part of it.
 This is our own code, under a different copyright holder to the mod's own
 `LICENSE`, which is why it needs a notice of its own.
 
-- Pinned commit: `fec3b4c8a6fe9c45401cf65d3d43d4f5acd22b72`
+- Pinned commit: `f441e29427b7422a584ba492dddd7788881804b0`
 - **Upstream**: https://github.com/itsloopyo/cameraunlock-core
 
 ```
