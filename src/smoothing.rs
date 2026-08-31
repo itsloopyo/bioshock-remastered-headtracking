@@ -127,6 +127,14 @@ pub const DEFAULT_LOCAL_SMOOTHING: f64 = 0.0;
 /// Matches `DefaultRemoteSmoothing` / `kDefaultRemoteSmoothing`.
 pub const DEFAULT_REMOTE_SMOOTHING: f64 = 0.15;
 
+/// Interpolation speed at smoothing=0, and at smoothing=1. `speed` is lerped
+/// between them and clamped to the same pair, so the per-frame factor is always
+/// strictly between 0 and 1. Matches `kFrameInterpolationSpeed` /
+/// `kMaxSmoothingSpeed` in the C++ core and `FrameInterpolationSpeed` /
+/// `MaxSmoothingSpeed` in the C# core.
+pub const FRAME_INTERPOLATION_SPEED: f64 = 50.0;
+pub const MAX_SMOOTHING_SPEED: f64 = 0.1;
+
 /// Select the smoothing value for the current connection. This is the
 /// only path by which a smoothing value reaches the smoother; never pick
 /// with an `if` at the call site.
@@ -335,7 +343,8 @@ impl Smoother {
             return target;
         }
         // 0..1 maps to speeds 50..0.1. Matches SmoothingUtils.cs / .h.
-        let speed = lerp(50.0, 0.1, smoothing).clamp(0.1, 50.0);
+        let speed = lerp(FRAME_INTERPOLATION_SPEED, MAX_SMOOTHING_SPEED, smoothing)
+            .clamp(MAX_SMOOTHING_SPEED, FRAME_INTERPOLATION_SPEED);
         let t = 1.0 - (-speed * dt).exp();
         self.current = self.kind.interpolate(self.current, target, t);
         self.current
@@ -966,5 +975,71 @@ mod tests {
         let pipe = PIPELINE.lock();
         assert!(pipe.last_frame.is_none());
         assert_eq!(pipe.last_seen_seq, 0);
+    }
+}
+
+
+/// Pins this port's copies of the shared tuning constants to
+/// `cameraunlock-core/data/pipeline-conformance.json`, which is where core
+/// declares them for every language that cannot reference the C++ or C# symbol
+/// directly. A port reimplements the pipeline, so nothing carries a core change
+/// into it; this is what makes such a change fail here loudly instead of leaving
+/// the mod quietly on the old number.
+#[cfg(test)]
+mod core_constants {
+    /// Reads one entry out of the constants block. Deliberately hand-rolled:
+    /// pulling in a JSON parser to read eleven numbers in a test would put a
+    /// dependency in the tree for nothing.
+    fn core_constant(name: &str) -> f64 {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/cameraunlock-core/data/pipeline-conformance.json"
+        );
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {}", path, e));
+        let key = format!("\"{}\"", name);
+        let start = text
+            .find(&key)
+            .unwrap_or_else(|| panic!("{} is not in the constants block of {}", name, path));
+        let after = &text[start + key.len()..];
+        let value_at = after
+            .find("\"value\"")
+            .unwrap_or_else(|| panic!("{} has no value field", name));
+        let rest = after[value_at + "\"value\"".len()..].trim_start();
+        let rest = rest
+            .strip_prefix(':')
+            .unwrap_or_else(|| panic!("{} value is not a JSON member", name))
+            .trim_start();
+        let end = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e'))
+            .unwrap_or(rest.len());
+        rest[..end]
+            .parse()
+            .unwrap_or_else(|e| panic!("{} value is not a number: {}", name, e))
+    }
+
+    #[test]
+    fn constants_match_the_core() {
+        let pairs: [(&str, f64); 11] = [
+            ("local_smoothing_default", super::DEFAULT_LOCAL_SMOOTHING),
+            ("remote_smoothing_default", super::DEFAULT_REMOTE_SMOOTHING),
+            ("frame_interpolation_speed", super::FRAME_INTERPOLATION_SPEED),
+            ("max_smoothing_speed", super::MAX_SMOOTHING_SPEED),
+            ("interval_blend", super::INTERVAL_BLEND),
+            ("max_extrapolation_fraction", super::MAX_EXTRAPOLATION_FRACTION),
+            ("default_sample_interval", super::DEFAULT_SAMPLE_INTERVAL),
+            ("min_sample_interval", super::MIN_SAMPLE_INTERVAL),
+            ("max_sample_interval", super::MAX_SAMPLE_INTERVAL),
+            ("extrapolation_hold_seconds", super::EXTRAPOLATION_HOLD),
+            ("extrapolation_decay_seconds", super::EXTRAPOLATION_DECAY),
+        ];
+        for (name, ours) in pairs {
+            assert_eq!(
+                core_constant(name),
+                ours,
+                "{} has drifted from cameraunlock-core/data/pipeline-conformance.json",
+                name
+            );
+        }
     }
 }
