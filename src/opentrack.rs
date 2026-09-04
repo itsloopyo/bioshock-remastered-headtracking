@@ -51,7 +51,7 @@ const READ_TIMEOUT_MS: u64 = 4;
 /// Bind retry cadence when the port is held by another process. Mirrors
 /// `OpenTrackReceiver` in cameraunlock-core/csharp so users get the same
 /// "close the conflicting tracker, tracking comes back" experience.
-const BIND_RETRY_INTERVAL_MS: u64 = 5000;
+const BIND_RETRY_INTERVAL_MS: u64 = 500;
 const BIND_RETRY_LOG_INTERVAL_MS: u64 = 30000;
 
 /// Parsed OpenTrack data packet
@@ -218,10 +218,10 @@ fn bind_with_retry() -> Option<UdpSocket> {
         }
         Err(e) => {
             log::error!(
-                "Failed to bind UDP port {} ({}) -- will retry every {}s",
+                "Failed to bind UDP port {} ({}) -- will retry every {}ms",
                 OPENTRACK_PORT,
                 e,
-                BIND_RETRY_INTERVAL_MS / 1000
+                BIND_RETRY_INTERVAL_MS
             );
         }
     }
