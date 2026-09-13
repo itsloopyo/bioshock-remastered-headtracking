@@ -14,6 +14,7 @@ An unofficial head tracking mod for BioShock Remastered that moves the view with
 - **True look / aim decoupling** - the engine sees your unmodified
   mouse aim while the rendered view follows your head, so bullets
   always land where the reticle is drawn.
+- **Works with any OpenTrack compatible tracker** - free options available for PC, iOS and Android
 - **Parallax-correct reticle** drawn directly into the swap chain,
   replacing BioShock's gun and plasmid reticles.
 
@@ -25,6 +26,13 @@ An unofficial head tracking mod for BioShock Remastered that moves the view with
   48-byte OpenTrack packets to port 4242 works.
 
 ## Installation
+
+### Lopari
+
+Download [Lopari](https://lopari.app), choose **BioShock Remastered**, and click
+**Play with head tracking**.
+
+### Standalone Installer
 
 1. Download the latest `BioshockRemasteredHeadTracking-v<version>-installer.zip`
    from [Releases](https://github.com/itsloopyo/bioshock-remastered-headtracking/releases).
