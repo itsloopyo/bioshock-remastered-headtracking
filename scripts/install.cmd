@@ -12,6 +12,7 @@ set "MOD_INTERNAL_NAME=BioshockRemasteredHeadTracking"
 set "MOD_VERSION=0.4.0"
 set "STATE_FILE=.headtracking-state.json"
 set "FRAMEWORK_TYPE=None"
+set "SHIM_MARKER=BioShock Head Tracking v"
 set "MOD_CONTROLS=Controls (nav cluster / chord):&echo   End      / Ctrl+Shift+Y  Toggle tracking&echo   PageUp   / Ctrl+Shift+G  Toggle 6DOF position&echo   PageDown / Ctrl+Shift+H  Toggle yaw mode"
 :: --- END CONFIG BLOCK ---
 

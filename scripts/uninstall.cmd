@@ -12,6 +12,7 @@ set "MOD_DLLS=xinput1_3.dll"
 set "MOD_INTERNAL_NAME=BioshockRemasteredHeadTracking"
 set "STATE_FILE=.headtracking-state.json"
 set "FRAMEWORK_TYPE=None"
+set "SHIM_MARKER=BioShock Head Tracking v"
 set "LEGACY_DLLS="
 
 set "MANAGED_SUBFOLDER="
