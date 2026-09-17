@@ -1,22 +1,6 @@
-//! D3D11 HUD interception.
-//!
-//! Hooks `IDXGISwapChain::Present` (to draw the overlay reticle on top
-//! of the final frame) and the two `ID3D11DeviceContext` draw APIs that
-//! BioShock Remastered's Scaleform HUD uses:
-//!
-//! - `DrawIndexed(idx=234)` is the compass / quest needle - used as a
-//!   "HUD render is happening this frame" marker.
-//! - `Draw(vtx=11)` is the health / EVE bar - same role; together with
-//!   the compass it covers every gameplay frame.
-//! - `Draw(vtx=9)` is the gun reticle, `Draw(vtx=21)` is the plasmid
-//!   reticle - we drop these whenever head tracking is enabled, but
-//!   only after the per-frame HUD-active flag has been raised so we
-//!   don't clip world particles that happen to use the same vertex
-//!   counts.
-
 use std::ffi::c_void;
 use std::mem;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use once_cell::sync::OnceCell;
 
@@ -41,37 +25,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WINDOW_EX_STYLE, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
-/// Per-frame "HUD render is happening RIGHT NOW" flag. Set whenever a
-/// known HUD-only draw fires (compass `idx=234` or health `vtx=11`).
-/// Cleared at the next `Present`. Gates reticle suppression so we only
-/// drop `vtx=9 / 21` draws inside the HUD render window, never world
-/// particles that happen to use the same vertex counts.
-pub static HUD_ACTIVE_THIS_FRAME: AtomicBool = AtomicBool::new(false);
-
-/// Vertex counts for the gun (`9`) and plasmid (`21`) reticles, dropped
-/// during HUD render whenever head tracking is enabled.
-const CROSSHAIR_VERTEX_COUNTS: &[u32] = &[9, 21];
-
-/// Timestamps (ms-since-start via `engine_hook::now_ms`) of the most
-/// recent compass / health draws. The overlay's `gameplay_is_live()`
-/// gate reads these to decide whether to draw the reticle.
-pub static LAST_HUD_COMPASS_MS: AtomicU64 = AtomicU64::new(0);
-pub static LAST_HUD_HEALTH_MS: AtomicU64 = AtomicU64::new(0);
-
 /// D3D11 vtable function pointer types.
 type PresentFn =
     unsafe extern "system" fn(this: *mut c_void, sync_interval: u32, flags: u32) -> i32;
-type DrawIndexedFn = unsafe extern "system" fn(
-    this: *mut c_void,
-    index_count: u32,
-    start_index_location: u32,
-    base_vertex_location: i32,
-);
 type DrawFn =
     unsafe extern "system" fn(this: *mut c_void, vertex_count: u32, start_vertex_location: u32);
 
 static ORIGINAL_PRESENT: OnceCell<PresentFn> = OnceCell::new();
-static ORIGINAL_DRAW_INDEXED: OnceCell<DrawIndexedFn> = OnceCell::new();
 static ORIGINAL_DRAW: OnceCell<DrawFn> = OnceCell::new();
 static HOOKED: AtomicBool = AtomicBool::new(false);
 
@@ -131,7 +91,6 @@ fn create_temp_window() -> Result<HWND, &'static str> {
 
 struct VtableAddrs {
     present: *mut c_void,
-    draw_indexed: *mut c_void,
     draw: *mut c_void,
 }
 
@@ -189,17 +148,12 @@ fn get_vtable_addrs() -> Result<VtableAddrs, &'static str> {
         let sc_vtable = *(sc_ptr as *const *const *const c_void);
         let present = *sc_vtable.add(8) as *mut c_void;
 
-        // Vtable indices on ID3D11DeviceContext: 12 = DrawIndexed, 13 = Draw.
+        // Vtable index 13 on ID3D11DeviceContext = Draw.
         let ctx_ptr = windows::core::Interface::as_raw(&context);
         let ctx_vtable = *(ctx_ptr as *const *const *const c_void);
-        let draw_indexed = *ctx_vtable.add(12) as *mut c_void;
         let draw = *ctx_vtable.add(13) as *mut c_void;
 
-        Ok(VtableAddrs {
-            present,
-            draw_indexed,
-            draw,
-        })
+        Ok(VtableAddrs { present, draw })
     }
 }
 
@@ -217,59 +171,10 @@ unsafe extern "system" fn hooked_present(this: *mut c_void, sync_interval: u32, 
         }
     }
 
-    // Draw our reticle on top of the game's final frame, just before
-    // the swap. Only does anything when head tracking is enabled.
-    if crate::tracking::is_enabled_atomic() {
-        // Read the SAME smoothed values engine_hook just wrote into
-        // the FRotator. Reading the raw tracker atomic here would
-        // make the reticle drift away from the rendered view by one
-        // tracker-period of motion (jitter on phone trackers, ~16ms
-        // lag at 60Hz).
-        //
-        // When rotation tracking is off (position-only mode), the
-        // engine_hook skips the FRotator add, so the rendered view
-        // matches clean (mouse) aim - feeding the smoothed atomics
-        // here would make the reticle compensate for a rotational
-        // offset that isn't actually in the rendered frame, and the
-        // reticle drifts off the bullet hit point. Zero them so the
-        // projection runs on parallax-from-position alone.
-        let (yaw_deg, pitch_deg, roll_deg) = if crate::tracking::is_rotation_enabled_atomic() {
-            crate::tracking::ATOMIC_SMOOTHED_ROTATION.load()
-        } else {
-            (0.0, 0.0, 0.0)
-        };
-        super::overlay::draw(this, yaw_deg, pitch_deg, roll_deg);
-    }
-
-    // Clear the per-frame HUD-active flag at frame boundary. Compass /
-    // health draws will raise it again next frame if HUD is still up.
-    HUD_ACTIVE_THIS_FRAME.store(false, Ordering::Release);
-
     if let Some(&orig) = ORIGINAL_PRESENT.get() {
         orig(this, sync_interval, flags)
     } else {
         0
-    }
-}
-
-unsafe extern "system" fn hooked_draw_indexed(
-    this: *mut c_void,
-    index_count: u32,
-    start_index_location: u32,
-    base_vertex_location: i32,
-) {
-    // Compass / quest needle - HUD render marker.
-    if index_count == 234 {
-        LAST_HUD_COMPASS_MS.store(crate::engine_hook::now_ms(), Ordering::Relaxed);
-        HUD_ACTIVE_THIS_FRAME.store(true, Ordering::Release);
-    }
-    if let Some(&orig) = ORIGINAL_DRAW_INDEXED.get() {
-        orig(
-            this,
-            index_count,
-            start_index_location,
-            base_vertex_location,
-        );
     }
 }
 
@@ -278,28 +183,18 @@ unsafe extern "system" fn hooked_draw(
     vertex_count: u32,
     start_vertex_location: u32,
 ) {
-    // Health / EVE bar - HUD render marker. Multiple draws per
-    // gameplay frame.
-    if vertex_count == 11 {
-        LAST_HUD_HEALTH_MS.store(crate::engine_hook::now_ms(), Ordering::Relaxed);
-        HUD_ACTIVE_THIS_FRAME.store(true, Ordering::Release);
+    let original = *ORIGINAL_DRAW.get().unwrap();
+    if super::reticle::is_current_draw() {
+        match crate::engine_hook::reticle_state() {
+            crate::engine_hook::ReticleState::Position(offset) => {
+                super::reticle::draw(this, vertex_count, start_vertex_location, original, offset);
+                return;
+            }
+            crate::engine_hook::ReticleState::Hidden => return,
+            crate::engine_hook::ReticleState::Inactive => {}
+        }
     }
-
-    // Reticle suppression - drop the gun and plasmid reticles
-    // whenever head tracking is enabled, but only inside the HUD
-    // render window so we don't clip world particles with the same
-    // vertex counts. With tracking disabled the user gets vanilla
-    // behaviour: game reticle visible, our overlay not drawn.
-    let suppress = crate::tracking::is_enabled_atomic()
-        && HUD_ACTIVE_THIS_FRAME.load(Ordering::Acquire)
-        && CROSSHAIR_VERTEX_COUNTS.contains(&vertex_count);
-    if suppress {
-        return;
-    }
-
-    if let Some(&orig) = ORIGINAL_DRAW.get() {
-        orig(this, vertex_count, start_vertex_location);
-    }
+    original(this, vertex_count, start_vertex_location);
 }
 
 // =========================================================================
@@ -318,12 +213,6 @@ pub fn install() -> Result<(), String> {
             hooked_present as *mut c_void,
             &ORIGINAL_PRESENT,
             "IDXGISwapChain::Present",
-        )?;
-        install_hook(
-            addrs.draw_indexed,
-            hooked_draw_indexed as *mut c_void,
-            &ORIGINAL_DRAW_INDEXED,
-            "ID3D11DeviceContext::DrawIndexed",
         )?;
         install_hook(
             addrs.draw,

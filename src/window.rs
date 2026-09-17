@@ -17,7 +17,8 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    GetWindowRect, SetWindowPos, HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER,
 };
 
 static CENTERED: AtomicBool = AtomicBool::new(false);
@@ -76,7 +77,8 @@ pub fn center_once(hwnd: HWND) {
             new_y,
             0,
             0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            // Present can run while the window thread waits for the renderer.
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         ) {
             log::warn!("window: SetWindowPos failed: {:?}", e);
             return;

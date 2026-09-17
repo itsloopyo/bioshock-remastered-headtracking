@@ -6,8 +6,7 @@
 //! Ships as a DLL hijack via `xinput1_3.dll` drop-in. The game loads this
 //! proxy, which forwards XInput calls to the real library while we initialize
 //! the tracking pipeline (OpenTrack receiver, hotkey poller, the UE 2.5
-//! `eventPlayerCalcView` hook, and the D3D11 reticle overlay / HUD-suppress
-//! hooks).
+//! render-view hook, and the native HUD reticle translation).
 
 // This module is the XInput proxy boundary. All `pub unsafe extern "system"`
 // XInput exports have the same trivial safety contract (caller must satisfy
@@ -17,6 +16,7 @@
 // noise without information.
 #![allow(clippy::missing_safety_doc, clippy::missing_transmute_annotations)]
 
+mod compass;
 mod config;
 pub mod conformance;
 mod d3d;
@@ -25,6 +25,7 @@ mod hook_util;
 mod hotkeys;
 mod memory;
 mod opentrack;
+mod projection;
 mod smoothing;
 mod tracking;
 mod window;
@@ -244,27 +245,17 @@ fn init_runtime_state() {
     hotkeys::start_hotkey_thread();
 }
 
-/// Locate `APlayerController::eventPlayerCalcView` in the live module
-/// and install the head-tracking detour.
 fn install_engine_hook() {
-    let Some(scanner) = memory::MemoryScanner::new() else {
-        log::error!("Failed to create memory scanner");
-        return;
-    };
-    let Some(addr) = memory::find_player_calc_view_target(&scanner) else {
-        log::error!(
-            "Could not locate eventPlayerCalcView - head tracking will not move the camera"
-        );
-        return;
-    };
-    if let Err(e) = engine_hook::install(addr) {
+    let result = memory::find_render_hooks().and_then(|hooks| {
+        engine_hook::install(hooks.camera_constructor, hooks.matrix_updater)?;
+        compass::install(hooks.mesh_draw, hooks.lit_mesh_draw, hooks.compass_vtable)?;
+        d3d::reticle::install(hooks.hud_draw)
+    });
+    if let Err(e) = result {
         log::error!("Engine hook install failed: {}", e);
     }
 }
 
-/// Hook the swap chain `Present` (for the overlay reticle) and the
-/// two `ID3D11DeviceContext` draw APIs Scaleform uses for the HUD
-/// (for HUD-active gating + reticle suppression).
 fn install_d3d_hooks() {
     if let Err(e) = d3d::hud::install() {
         log::error!("D3D11 hook install failed: {}", e);

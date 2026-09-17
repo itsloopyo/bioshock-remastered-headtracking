@@ -6,6 +6,7 @@ version = 4
 name = "bioshock-remastered-head-tracking"
 version = "0.4.0"
 dependencies = [
+ "cc",
  "log",
  "minhook",
  "once_cell",

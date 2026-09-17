@@ -5,18 +5,15 @@
 <sub>Gameplay footage of BioShock Remastered, (c) 2K Games / Irrational Games /
 Blind Squirrel Entertainment, shown to demonstrate what the mod does.</sub>
 
-An unofficial head tracking mod for BioShock Remastered that moves the view with your head while your mouse or controller keeps aiming, driven by OpenTrack over UDP, with no VR headset required.
+An unofficial head tracking mod for BioShock Remastered that moves the view with your head while your mouse or controller keeps aiming, driven by a webcam, phone, or any OpenTrack compatible tracker, with no VR headset required.
 
 ## Features
 
-- **6DOF head tracking** via OpenTrack UDP - yaw, pitch, roll, and
-  positional lean.
-- **True look / aim decoupling** - the engine sees your unmodified
-  mouse aim while the rendered view follows your head, so bullets
-  always land where the reticle is drawn.
+- **Decoupled look and aim** - head tracking moves the view; your
+  mouse or controller keeps aiming.
+- **6DOF tracking** - yaw, pitch and roll plus positional lean, peek and duck.
 - **Works with any OpenTrack compatible tracker** - free options available for PC, iOS and Android
-- **Parallax-correct reticle** drawn directly into the swap chain,
-  replacing BioShock's gun and plasmid reticles.
+- **Native reticles** - BioShock's own reticles move with the aim point.
 
 ## Requirements
 
@@ -176,24 +173,10 @@ swaps the value immediately, with no game restart. Local defaults to
 zero because a same-machine tracker is already stable and any smoothing
 there is pure added latency.
 
-### Non-default FOV
+### Field of view
 
-If you've changed the FOV slider in BSR's options away from 100° (the
-stock value), the head-tracked reticle may drift away from the actual
-aim point - the mod can't auto-detect the slider value. Tell it your
-FOV manually:
-
-1. Open `bioshock_headtrack.ini`.
-2. Uncomment and set the overlay FOV:
-
-   ```ini
-   [overlay]
-   fov_h = 90
-   ```
-
-   Replace `90` with whatever horizontal FOV you've set in-game. Valid
-   range: 40-150°. Vertical FOV is derived from horizontal at 16:9.
-3. Restart the game.
+The mod reads the game's world and weapon projection matrices. Use the in-game
+FOV setting; the old `[overlay] fov_h` override is no longer used.
 
 ## Troubleshooting
 
@@ -208,10 +191,8 @@ FOV manually:
 - Look for `First tracker packet from ...` in that log. If it is absent,
   no tracker packet ever reached the mod and the problem is upstream of
   the game.
-- Look for `eventPlayerCalcView detour is receiving calls`. If the hook
-  installed but that line never appears, the mod loaded without ever
-  getting the camera - include the log so we can see which build you are
-  on.
+- Look for `FPlayerSceneNode hook installed` and `render:` entries during
+  gameplay. Include the log if either is missing.
 
 **Game crashes on launch.**
 - `xinput1_3.dll` must be in `Build/Final/`, not the game root.
@@ -219,8 +200,9 @@ FOV manually:
   -> Verify integrity, then reinstall the mod.
 
 **Reticle drifts left/right as you yaw your head.**
-- You're likely running a non-stock FOV. Set `[overlay] fov_h` in
-  `bioshock_headtrack.ini` (see Configuration).
+- Send `HeadTracking.log` with your in-game FOV setting and a screenshot
+  showing the misalignment. The mod uses the game's projection matrices;
+  no manual FOV calibration is needed.
 
 **Yaw feels wrong when looking up or down at extreme angles.**
 - Try toggling between world-locked and camera-local yaw with

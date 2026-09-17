@@ -22,6 +22,9 @@ simplelog = "0.12.2"
 once_cell = "1.20.2"
 minhook = "0.8.0"
 
+[build-dependencies]
+cc = "=1.2.51"
+
 [dependencies.windows]
 version = "0.58.0"
 features = [
@@ -29,7 +32,7 @@ features = [
     "Win32_Graphics_Direct3D9",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Security_Cryptography",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -51,4 +54,3 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 1
-

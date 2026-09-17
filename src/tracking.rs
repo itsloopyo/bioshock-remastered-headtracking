@@ -179,20 +179,6 @@ pub static ATOMIC_POSITION: AtomicRotation = AtomicRotation::new();
 /// instead of the true sample interval.
 pub static ATOMIC_SAMPLE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Smoothed rotation in degrees, post-interpolation + post-smoothing.
-/// Written by `smoothing::tick_frame` from the engine
-/// hook each render frame; read by the D3D11 reticle overlay so its
-/// projection uses the SAME head pose the engine_hook just baked into
-/// the FRotator. Without sharing this through an atomic, the overlay
-/// would project against raw atomics and the reticle would drift away
-/// from the rendered view by one tracker-period of motion.
-pub static ATOMIC_SMOOTHED_ROTATION: AtomicRotation = AtomicRotation::new();
-
-/// Smoothed body-frame position offset in centimetres
-/// `(right, up, forward)`, post-interpolation + post-smoothing. Same
-/// rationale as `ATOMIC_SMOOTHED_ROTATION`.
-pub static ATOMIC_SMOOTHED_POSITION: AtomicRotation = AtomicRotation::new();
-
 /// Atomic enabled flag for lock-free access
 pub static ATOMIC_ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -374,26 +360,6 @@ pub static ATOMIC_POSITION_ENABLED: AtomicBool = AtomicBool::new(true);
 #[inline(always)]
 pub fn is_position_enabled_atomic() -> bool {
     ATOMIC_POSITION_ENABLED.load(Ordering::Acquire)
-}
-
-/// The head offset that engine_hook actually applied this frame, in
-/// body-frame centimetres `(right, up, forward)` - i.e. what
-/// `get_position_atomic()` returned, clamped to the
-/// per-axis limits, AND zeroed when position tracking is toggled
-/// off. The overlay reads this so the reticle can compensate for
-/// parallax: with positional tracking on, the rendered view shifts
-/// relative to where the gun is aimed, so the reticle has to shift
-/// too to stay glued to the bullet hit point.
-pub static ATOMIC_APPLIED_HEAD_OFFSET: AtomicRotation = AtomicRotation::new();
-
-#[inline(always)]
-pub fn store_applied_head_offset(right: f64, up: f64, forward: f64) {
-    ATOMIC_APPLIED_HEAD_OFFSET.store(right, up, forward);
-}
-
-#[inline(always)]
-pub fn applied_head_offset() -> (f64, f64, f64) {
-    ATOMIC_APPLIED_HEAD_OFFSET.load()
 }
 
 /// Lazy-initialized global state, wrapped in Arc<RwLock<>> for thread safety

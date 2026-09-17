@@ -1,44 +1,17 @@
-//! UE2.5 engine-level camera hook.
-//!
-//! Hooks `APlayerController::eventPlayerCalcView(AActor** ViewActor,
-//! FVector* CameraLocation, FRotator* CameraRotation)` - the event thunk
-//! the engine calls per frame to compute the render view.
-//!
-//! Our detour lets the original run (UnrealScript fills `*CameraRotation`
-//! with the game's intended view - typically `Controller.Rotation`), then
-//! adds the current head-tracked offset on top.
-//!
-//! Aim stays decoupled because the gameplay code reads
-//! `APlayerController.Rotation` directly (the mouse-driven control
-//! rotation), which we never touch.
-//!
-//! ## Absolute offset, not a delta
-//!
-//! The original thunk rebuilds `*CameraRotation` from
-//! `Controller.Rotation` on every call, so each frame the buffer arrives
-//! "clean". We therefore add the full head-tracked rotation each frame,
-//! not a delta. Toggle-off returns the view to the mouse instantly; no
-//! accumulator state to keep in sync.
-//!
-//! ## Units
-//!
-//! UE2.5 `FRotator` stores each axis as an `i32` where one full turn is
-//! `0x10000` (65536 units = 360°). Conversion is
-//! `units = (degrees * 65536 / 360) as i32`.
-
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use once_cell::sync::OnceCell;
+use parking_lot::Mutex;
 
 use crate::hook_util::install_hook;
+use crate::projection::{self, Matrix};
 use crate::tracking::{
     is_enabled_atomic, is_position_enabled_atomic, is_rotation_enabled_atomic,
     is_world_space_yaw_atomic,
 };
 
-/// UE2.5 FRotator layout.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FRotator {
@@ -47,10 +20,8 @@ struct FRotator {
     roll: i32,
 }
 
-/// UE2.5 FVector - three single-precision floats in world units.
-/// BSR uses 1 unit = 1 cm, matching OpenTrack's position units, so
-/// head deltas apply 1:1.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct FVector {
     x: f32,
     y: f32,
@@ -71,80 +42,87 @@ struct Basis {
     up: Vec3,
 }
 
-/// `eventPlayerCalcView` is MSVC __thiscall on x86: `this` in ECX, stack
-/// args pushed right-to-left, callee cleans.
-type EventPlayerCalcViewFn = unsafe extern "thiscall" fn(
-    this: *mut c_void,
-    view_actor: *mut *mut c_void,
-    camera_location: *mut c_void,
-    camera_rotation: *mut FRotator,
-);
+type CameraSceneNodeFn = unsafe extern "thiscall" fn(
+    *mut u8,
+    *mut c_void,
+    *mut c_void,
+    *mut u8,
+    f32,
+    f32,
+    f32,
+    i32,
+    i32,
+    i32,
+    f32,
+    f32,
+) -> *mut u8;
+type UpdateMatricesFn = unsafe extern "thiscall" fn(*mut u8);
+type LineCheckFn = unsafe extern "thiscall" fn(
+    *mut c_void,
+    *mut Hit,
+    *mut u8,
+    *const FVector,
+    *const FVector,
+    u32,
+    *const FVector,
+    u32,
+) -> i32;
 
-static ORIGINAL: OnceCell<EventPlayerCalcViewFn> = OnceCell::new();
-
-/// Latch for the one-shot "the detour is actually being called" log line.
-static FIRST_CALL_LOGGED: AtomicBool = AtomicBool::new(false);
-
-/// Milliseconds-since-start of the most recent `eventPlayerCalcView`
-/// call. The D3D11 overlay uses its recency as the "we're in gameplay"
-/// signal.
-pub static LAST_PCV_MS: AtomicU64 = AtomicU64::new(0);
-
-/// Cached PlayerController `this` pointer, captured each
-/// `eventPlayerCalcView` call. The overlay reads
-/// `*(this + FOV_LIVE_OFFSET) as f32` to get the live in-engine FOV.
-pub static PLAYER_CONTROLLER_PTR: AtomicUsize = AtomicUsize::new(0);
-
-/// Cache of the most recently `is_memory_valid`-confirmed camera
-/// `FVector` pointer. The PCV detour gets the same pointer every frame
-/// once the world is loaded, so a per-frame `VirtualQuery` syscall is
-/// wasted work. Re-validates on pointer change (level transition).
-static VALIDATED_CAMERA_LOCATION_PTR: AtomicUsize = AtomicUsize::new(0);
-
-/// Snapshot of the CLEAN (mouse-driven) camera rotation, captured each
-/// `eventPlayerCalcView` call BEFORE the head-tracking delta is layered
-/// on top. Stored in raw FRotator units (65536 = 360°). The overlay
-/// uses these to project gun-aim direction through the head-rotated
-/// view.
-pub static CLEAN_PITCH_UNITS: AtomicI32 = AtomicI32::new(0);
-pub static CLEAN_YAW_UNITS: AtomicI32 = AtomicI32::new(0);
-pub static CLEAN_ROLL_UNITS: AtomicI32 = AtomicI32::new(0);
-
-pub fn units_to_deg(units: i32) -> f64 {
-    units as f64 * (360.0 / 65536.0)
+#[repr(C)]
+struct Hit {
+    next: u32,
+    actor: u32,
+    location: FVector,
+    normal: FVector,
+    primitive: u32,
+    time: f32,
+    item: i32,
+    rest: [u32; 5],
 }
 
-/// Offset of `DefaultFOV` in BSR's PlayerController. The in-game FOV
-/// slider writes elsewhere we couldn't locate, so users running a
-/// non-default FOV declare it via `bioshock_headtrack.ini`.
-pub const FOV_LIVE_OFFSET: usize = 0x00E0;
-
-/// Read the live FOV (horizontal degrees, at the player's actual
-/// rendering aspect). Returns `None` if the PlayerController hasn't
-/// been captured yet or the value is outside a sane range.
-pub fn read_game_fov_h_native() -> Option<f32> {
-    let ptr = PLAYER_CONTROLLER_PTR.load(Ordering::Acquire);
-    if ptr == 0 {
-        return None;
-    }
-    if !crate::memory::is_memory_valid(ptr + FOV_LIVE_OFFSET, 4) {
-        return None;
-    }
-    unsafe {
-        let p = (ptr as *const u8).add(FOV_LIVE_OFFSET) as *const f32;
-        let v = std::ptr::read_unaligned(p);
-        if v.is_finite() && (30.0..=150.0).contains(&v) {
-            Some(v)
-        } else {
-            None
-        }
-    }
+extern "C" {
+    fn apply_lean_clamp(offset: *mut f32, delta_time: f32, skin: f32, blocked: i32, distance: f32);
+    fn reset_lean_clamp();
 }
 
-/// Monotonic time source shared by every "recent activity?" probe.
+static ORIGINAL: OnceCell<CameraSceneNodeFn> = OnceCell::new();
+static UPDATE_MATRICES: OnceCell<UpdateMatricesFn> = OnceCell::new();
+#[derive(Clone, Copy)]
+pub enum ReticleState {
+    Inactive,
+    Hidden,
+    Position([f32; 2]),
+}
+
+static RETICLE: Mutex<ReticleState> = Mutex::new(ReticleState::Inactive);
+static CLEAN_SCENE: Mutex<Option<(usize, Matrix, Matrix)>> = Mutex::new(None);
+
+pub fn clean_scene(scene: usize) -> Option<(Matrix, Matrix)> {
+    // Auxiliary views must keep their own matrices.
+    CLEAN_SCENE
+        .lock()
+        .filter(|entry| entry.0 == scene)
+        .map(|entry| (entry.1, entry.2))
+}
+static LAST_VIEW_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_LOG_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_ACTOR: AtomicUsize = AtomicUsize::new(0);
+static VIEW_CALLS: AtomicU64 = AtomicU64::new(0);
+
 pub fn now_ms() -> u64 {
     static START: OnceCell<Instant> = OnceCell::new();
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+pub fn reticle_state() -> ReticleState {
+    if !is_enabled_atomic() || now_ms().saturating_sub(LAST_VIEW_MS.load(Ordering::Relaxed)) > 250 {
+        return ReticleState::Inactive;
+    }
+    *RETICLE.lock()
+}
+
+pub fn units_to_deg(units: i32) -> f64 {
+    units as f64 * (360.0 / 65536.0)
 }
 
 const UNITS_PER_DEGREE: f64 = 65536.0 / 360.0;
@@ -319,132 +297,226 @@ fn dot(a: Vec3, b: Vec3) -> f64 {
     a.x * b.x + a.y * b.y + a.z * b.z
 }
 
-/// The detour. Calls original first, then mutates the out-FRotator
-/// (and the camera FVector when 6DOF position is enabled).
-unsafe extern "thiscall" fn event_player_calc_view_detour(
-    this: *mut c_void,
-    view_actor: *mut *mut c_void,
-    camera_location: *mut c_void,
-    camera_rotation: *mut FRotator,
-) {
-    let Some(&original) = ORIGINAL.get() else {
-        return;
-    };
-
-    // Let UnrealScript compute the canonical view first. After this
-    // returns, `*camera_rotation` is the rotation the engine would render
-    // with.
-    original(this, view_actor, camera_location, camera_rotation);
-
-    // Stamp the "gameplay is live" timestamp.
-    LAST_PCV_MS.store(now_ms(), Ordering::Relaxed);
-
-    // "Hook installed" and "hook is being called" are different claims, and
-    // only the second one means the camera path is ours. One line, latched -
-    // this runs every frame.
-    if !FIRST_CALL_LOGGED.load(Ordering::Relaxed)
-        && !FIRST_CALL_LOGGED.swap(true, Ordering::Relaxed)
-    {
-        log::info!("eventPlayerCalcView detour is receiving calls - camera path is hooked");
-    }
-
-    // Cache the PlayerController pointer for live FOV reads.
-    if !this.is_null() {
-        PLAYER_CONTROLLER_PTR.store(this as usize, Ordering::Release);
-    }
-
-    if camera_rotation.is_null() {
-        return;
-    }
-
-    // Snapshot the CLEAN rotation BEFORE we add the head-tracking
-    // delta. The overlay needs this for parallax-correct projection.
-    let clean = *camera_rotation;
-    CLEAN_PITCH_UNITS.store(clean.pitch, Ordering::Relaxed);
-    CLEAN_YAW_UNITS.store(clean.yaw, Ordering::Relaxed);
-    CLEAN_ROLL_UNITS.store(clean.roll, Ordering::Relaxed);
-
-    if !is_enabled_atomic() {
-        return;
-    }
-
-    // Drive the per-axis interpolator + smoother once per frame. The
-    // interpolator bridges low-rate trackers (60Hz phone) to the
-    // display refresh rate so the camera advances every frame instead
-    // of every other frame. Both rotation and position are returned;
-    // the same values are also published to ATOMIC_SMOOTHED_* so the
-    // D3D overlay's reticle projection stays glued to the rendered
-    // view.
-    let pose = crate::smoothing::tick_frame();
-    let (yaw_deg, pitch_deg, roll_deg) = pose.rotation;
-
-    // Roll is inverted: BioShock's FRotator.Roll increases clockwise
-    // around the view axis, OpenTrack reports counter-clockwise positive.
-    if is_rotation_enabled_atomic() {
-        let rot = &mut *camera_rotation;
-        if is_world_space_yaw_atomic() {
-            *rot = apply_world_space_yaw(&clean, yaw_deg, pitch_deg, roll_deg);
-        } else {
-            *rot = apply_camera_local_yaw(&clean, yaw_deg, pitch_deg, roll_deg);
-        }
-    }
-
-    // 6DOF position. Apply the head's translational delta to the
-    // engine's CameraLocation FVector. Lateral / forward components
-    // are rotated by the camera's CLEAN yaw so leaning forward goes
-    // "into the screen" relative to the player's in-world heading,
-    // not where their head is currently turned.
-    if is_position_enabled_atomic() && !camera_location.is_null() {
-        // Already bounded to the per-axis limits by the smoothing pipeline,
-        // on both sides of the smoother.
-        let (right, up, forward) = pose.position;
-
-        // Rotate (forward, right) into world XY using clean yaw.
-        // UE convention: forward = +X world, right = +Y world.
-        let yaw_rad = units_to_deg(clean.yaw).to_radians();
-        let cos_y = yaw_rad.cos();
-        let sin_y = yaw_rad.sin();
-        let world_dx = forward * cos_y - right * sin_y;
-        let world_dy = forward * sin_y + right * cos_y;
-        let world_dz = up;
-
-        let loc = camera_location as *mut FVector;
-        let loc_addr = loc as usize;
-        // Pointer-cache the VirtualQuery: skip the syscall when this
-        // is the same FVector slot we've already validated.
-        let cached = VALIDATED_CAMERA_LOCATION_PTR.load(Ordering::Relaxed);
-        let valid = if cached == loc_addr {
-            true
-        } else if crate::memory::is_memory_valid(loc_addr, std::mem::size_of::<FVector>()) {
-            VALIDATED_CAMERA_LOCATION_PTR.store(loc_addr, Ordering::Relaxed);
-            true
-        } else {
-            false
-        };
-        if valid {
-            (*loc).x += world_dx as f32;
-            (*loc).y += world_dy as f32;
-            (*loc).z += world_dz as f32;
-        }
-
-        // Publish the body-frame head offset so the overlay can do
-        // parallax-correct reticle projection.
-        crate::tracking::store_applied_head_offset(right, up, forward);
-    } else {
-        // Position tracking off / no camera_location - overlay must
-        // not apply any parallax compensation this frame.
-        crate::tracking::store_applied_head_offset(0.0, 0.0, 0.0);
-    }
+unsafe fn read_matrix(scene: *mut u8, offset: usize) -> Matrix {
+    std::ptr::read_unaligned(scene.add(offset).cast())
 }
 
-/// Install the detour. Idempotent.
-pub fn install(target_addr: usize) -> Result<(), String> {
+unsafe fn write_matrix(scene: *mut u8, offset: usize, matrix: Matrix) {
+    std::ptr::write_unaligned(scene.add(offset).cast(), matrix);
+}
+
+unsafe fn trace(actor: *mut u8, start: FVector, end: FVector, radius: f32) -> Hit {
+    let level = *actor.add(0xfc).cast::<*mut c_void>();
+    let vtable = *level.cast::<*const usize>();
+    let line_check: LineCheckFn = std::mem::transmute(*vtable.add(0x168 / 4));
+    let mut hit = Hit {
+        next: 0,
+        actor: 0,
+        location: FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        normal: FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        primitive: 0,
+        time: 1.0,
+        item: -1,
+        rest: [0; 5],
+    };
+    let extent = FVector {
+        x: radius,
+        y: radius,
+        z: radius,
+    };
+    line_check(level, &mut hit, actor, &end, &start, 0x101097, &extent, 0);
+    hit
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "thiscall" fn camera_scene_node_detour(
+    this: *mut u8,
+    viewport: *mut c_void,
+    render_target: *mut c_void,
+    actor: *mut u8,
+    x: f32,
+    y: f32,
+    z: f32,
+    pitch: i32,
+    yaw: i32,
+    roll: i32,
+    fov: f32,
+    weapon_fov: f32,
+) -> *mut u8 {
+    let scene = ORIGINAL.get().unwrap()(
+        this,
+        viewport,
+        render_target,
+        actor,
+        x,
+        y,
+        z,
+        pitch,
+        yaw,
+        roll,
+        fov,
+        weapon_fov,
+    );
+    let now = now_ms();
+    let frame = VIEW_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let previous = LAST_VIEW_MS.swap(now, Ordering::Relaxed);
+    let changed_actor = LAST_ACTOR.swap(actor as usize, Ordering::Relaxed) != actor as usize;
+    let pawn = *actor.add(0x450).cast::<*mut u8>();
+    let log_frame =
+        changed_actor || now.saturating_sub(LAST_LOG_MS.load(Ordering::Relaxed)) >= 1000;
+    if log_frame {
+        LAST_LOG_MS.store(now, Ordering::Relaxed);
+        log::info!(
+            "render view: frame={frame} controller={actor:p} pawn={pawn:p} enabled={} FOV={fov}/{weapon_fov}",
+            is_enabled_atomic()
+        );
+    }
+    if changed_actor || !is_enabled_atomic() || pawn.is_null() {
+        reset_lean_clamp();
+    }
+    if !is_enabled_atomic() || pawn.is_null() {
+        *CLEAN_SCENE.lock() = None;
+        *RETICLE.lock() = ReticleState::Inactive;
+        return scene;
+    }
+
+    let clean_view = read_matrix(scene, 0x150);
+    let clean_inverse = read_matrix(scene, 0x190);
+    let world_projection = read_matrix(scene, 0x1d0);
+    let inverse_projection = read_matrix(scene, 0x210);
+    let weapon_projection = read_matrix(scene, 0x380);
+    *CLEAN_SCENE.lock() = Some((scene as usize, clean_view, weapon_projection));
+    let clean = FRotator { pitch, yaw, roll };
+    let pose = crate::smoothing::tick_frame();
+    if log_frame {
+        log::info!(
+            "render pose: rotation={:?} position={:?}",
+            pose.rotation,
+            pose.position
+        );
+    }
+    let tracked = if !is_rotation_enabled_atomic() {
+        clean
+    } else if is_world_space_yaw_atomic() {
+        apply_world_space_yaw(&clean, pose.rotation.0, pose.rotation.1, pose.rotation.2)
+    } else {
+        apply_camera_local_yaw(&clean, pose.rotation.0, pose.rotation.1, pose.rotation.2)
+    };
+    let mut offset = [0.0_f32; 3];
+    if is_position_enabled_atomic() {
+        let (right, up, forward) = pose.position;
+        let angle = units_to_deg(yaw).to_radians();
+        offset = [
+            (forward * angle.cos() - right * angle.sin()) as f32,
+            (forward * angle.sin() + right * angle.cos()) as f32,
+            up as f32,
+        ];
+        let desired = offset.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let skin = (world_projection.0[3][2] / world_projection.0[2][2]).abs() + 1.0;
+        if desired > 0.0001 {
+            let distance = desired + skin;
+            let hit = trace(
+                actor,
+                FVector { x, y, z },
+                FVector {
+                    x: x + offset[0] * distance / desired,
+                    y: y + offset[1] * distance / desired,
+                    z: z + offset[2] * distance / desired,
+                },
+                skin,
+            );
+            apply_lean_clamp(
+                offset.as_mut_ptr(),
+                now.saturating_sub(previous) as f32 / 1000.0,
+                skin,
+                i32::from(hit.actor != 0),
+                hit.time * distance,
+            );
+        } else {
+            reset_lean_clamp();
+        }
+    } else {
+        reset_lean_clamp();
+    }
+
+    let direction = clean_inverse.transform([0.0, 0.0, 1.0, 0.0]);
+    let end = FVector {
+        x: x + direction[0] * 100_000.0,
+        y: y + direction[1] * 100_000.0,
+        z: z + direction[2] * 100_000.0,
+    };
+    let hit = trace(actor, FVector { x, y, z }, end, 0.0);
+    if log_frame {
+        log::info!("render trace: actor={:#x} time={}", hit.actor, hit.time);
+    }
+    let aim = if hit.actor == 0 {
+        direction
+    } else {
+        [
+            x + (end.x - x) * hit.time,
+            y + (end.y - y) * hit.time,
+            z + (end.z - z) * hit.time,
+            1.0,
+        ]
+    };
+
+    std::ptr::write_unaligned(
+        scene.add(0x310).cast(),
+        FVector {
+            x: x + offset[0],
+            y: y + offset[1],
+            z: z + offset[2],
+        },
+    );
+    std::ptr::write_unaligned(scene.add(0x3e4).cast(), tracked);
+    UPDATE_MATRICES.get().unwrap()(scene);
+
+    let tracked_view = read_matrix(scene, 0x150);
+    let corrected_weapon = projection::weapon_projection(
+        clean_view,
+        clean_inverse,
+        tracked_view,
+        read_matrix(scene, 0x190),
+        world_projection,
+        inverse_projection,
+        weapon_projection,
+    );
+    write_matrix(scene, 0x380, corrected_weapon);
+    write_matrix(scene, 0x290, tracked_view.multiply(corrected_weapon));
+    let reticle = projection::project(aim, tracked_view.multiply(world_projection));
+    *RETICLE.lock() = reticle.map_or(ReticleState::Hidden, ReticleState::Position);
+
+    if log_frame {
+        log::info!(
+            "render: clean=({},{},{}) tracked=({},{},{}) offset={:?} world_scale=({:.4},{:.4}) weapon_scale=({:.4},{:.4}) aim_fraction={:.5} reticle={:?}",
+            pitch, yaw, roll, tracked.pitch, tracked.yaw, tracked.roll, offset,
+            world_projection.0[0][0], world_projection.0[1][1],
+            weapon_projection.0[0][0], weapon_projection.0[1][1], hit.time, reticle,
+        );
+    }
+    scene
+}
+
+pub fn install(constructor: usize, update_matrices: usize) -> Result<(), String> {
     unsafe {
+        UPDATE_MATRICES
+            .set(std::mem::transmute::<usize, UpdateMatricesFn>(
+                update_matrices,
+            ))
+            .map_err(|_| "Camera scene matrix updater already installed".to_string())?;
         install_hook(
-            target_addr as *mut c_void,
-            event_player_calc_view_detour as *mut c_void,
+            constructor as *mut c_void,
+            camera_scene_node_detour as *mut c_void,
             &ORIGINAL,
-            "eventPlayerCalcView",
+            "FCameraSceneNode",
         )
     }
 }

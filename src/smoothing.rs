@@ -8,8 +8,7 @@
 //! framerate.
 //!
 //! Mirrors the canonical `cameraunlock-core/cpp` `PoseInterpolator` +
-//! `SmoothingUtils` (the BSR mod doesn't link the C++ core, so we
-//! port).
+//! `SmoothingUtils`.
 //!
 //! Pipeline per render frame:
 //!   raw atomics (yaw,pitch,roll, x,y,z) + sample-sequence counter
@@ -18,8 +17,7 @@
 //!        half a sample period past the latest known value)
 //!     -> per-axis Smoother (frame-rate independent exponential, using
 //!        the connection-selected LocalSmoothing / RemoteSmoothing value)
-//!     -> consumed by engine_hook (FRotator / FVector) and the D3D
-//!        overlay (reticle projection)
+//!     -> consumed by engine_hook (FRotator / FVector)
 //!
 //! State lives behind a `parking_lot::Mutex`. Engine_hook holds it for
 //! the duration of one `tick_frame` call; the hotkey thread holds it
@@ -32,10 +30,7 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 
-use crate::tracking::{
-    get_position_atomic, get_rotation_atomic, ATOMIC_SAMPLE_SEQ, ATOMIC_SMOOTHED_POSITION,
-    ATOMIC_SMOOTHED_ROTATION,
-};
+use crate::tracking::{get_position_atomic, get_rotation_atomic, ATOMIC_SAMPLE_SEQ};
 
 const INTERVAL_BLEND: f64 = 0.3;
 
@@ -449,10 +444,7 @@ pub struct SmoothedPose {
 }
 
 /// Tick the pipeline once per render frame. Reads raw atomics, advances
-/// the interpolator + smoother, writes the smoothed result to
-/// `ATOMIC_SMOOTHED_ROTATION` / `ATOMIC_SMOOTHED_POSITION` so the D3D
-/// overlay can read them, and returns the same values for the engine
-/// hook to consume directly.
+/// the interpolator + smoother, and returns the pose for the engine hook.
 ///
 /// Safe to call multiple times per wall-clock frame (shadow / reflection
 /// passes that re-trigger the camera hook). Each call advances
@@ -524,13 +516,11 @@ pub(crate) fn tick_with_dt(dt: f64) -> SmoothedPose {
     let sy = pipe.rot_smooth[0].update(iy, smoothing, dt);
     let sp = pipe.rot_smooth[1].update(ip, smoothing, dt);
     let sr = pipe.rot_smooth[2].update(ir, smoothing, dt);
-    ATOMIC_SMOOTHED_ROTATION.store(sy, sp, sr);
 
     let (raw_x, raw_y_pos, raw_z) = raw_pos;
     let sx = pipe.pos[0].update(raw_x, is_new_pos, dt, smoothing);
     let sy_pos = pipe.pos[1].update(raw_y_pos, is_new_pos, dt, smoothing);
     let sz = pipe.pos[2].update(raw_z, is_new_pos, dt, smoothing);
-    ATOMIC_SMOOTHED_POSITION.store(sx, sy_pos, sz);
 
     SmoothedPose {
         rotation: (sy, sp, sr),
@@ -978,7 +968,6 @@ mod tests {
     }
 }
 
-
 /// Pins this port's copies of the shared tuning constants to
 /// `cameraunlock-core/data/pipeline-conformance.json`, which is where core
 /// declares them for every language that cannot reference the C++ or C# symbol
@@ -995,8 +984,8 @@ mod core_constants {
             env!("CARGO_MANIFEST_DIR"),
             "/cameraunlock-core/data/pipeline-conformance.json"
         );
-        let text = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {}", path, e));
+        let text =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {}", path, e));
         let key = format!("\"{}\"", name);
         let start = text
             .find(&key)
@@ -1023,10 +1012,16 @@ mod core_constants {
         let pairs: [(&str, f64); 11] = [
             ("local_smoothing_default", super::DEFAULT_LOCAL_SMOOTHING),
             ("remote_smoothing_default", super::DEFAULT_REMOTE_SMOOTHING),
-            ("frame_interpolation_speed", super::FRAME_INTERPOLATION_SPEED),
+            (
+                "frame_interpolation_speed",
+                super::FRAME_INTERPOLATION_SPEED,
+            ),
             ("max_smoothing_speed", super::MAX_SMOOTHING_SPEED),
             ("interval_blend", super::INTERVAL_BLEND),
-            ("max_extrapolation_fraction", super::MAX_EXTRAPOLATION_FRACTION),
+            (
+                "max_extrapolation_fraction",
+                super::MAX_EXTRAPOLATION_FRACTION,
+            ),
             ("default_sample_interval", super::DEFAULT_SAMPLE_INTERVAL),
             ("min_sample_interval", super::MIN_SAMPLE_INTERVAL),
             ("max_sample_interval", super::MAX_SAMPLE_INTERVAL),

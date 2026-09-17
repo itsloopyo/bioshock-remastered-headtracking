@@ -164,8 +164,11 @@ compiler and are not linked into the DLL): `proc-macro2`, `quote`, `syn`,
 `(MIT OR Apache-2.0) AND Unicode-3.0`.
 
 `Cargo.lock` additionally pins `libc`, `bitflags`, `serde`, `redox_syscall`,
-`num_threads`, `cc`, `find-msvc-tools` and `shlex`. None of them are reachable
+`num_threads`. None of them are reachable
 from the `i686-pc-windows-msvc` graph, so none is present in the shipped DLL.
+
+`cc`, `find-msvc-tools` and `shlex` compile the C++ lean-clamp wrapper at build
+time and are not linked into the DLL.
 
 ---
 
@@ -176,7 +179,8 @@ it: `Copy-SharedBundle` stages the game-detection data and the shared installer
 scripts into `shared/` (`games.json`, `GamePathDetection.psm1`, `find-game.ps1`,
 `check-loader-arch.ps1`, `cecil-marker-check.ps1`, and the install / uninstall
 script bodies). MIT requires its notice to travel with those copies, so the full
-text is reproduced below. The Nexus ZIP carries no part of it.
+text is reproduced below. The DLL also compiles the shared C++ `LeanClamp`
+policy, so both ZIP variants redistribute that code.
 
 This is our own code, under a different copyright holder to the mod's own
 `LICENSE`, which is why it needs a notice of its own.
