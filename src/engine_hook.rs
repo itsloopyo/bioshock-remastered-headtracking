@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use once_cell::sync::OnceCell;
@@ -107,6 +107,7 @@ pub fn clean_scene(scene: usize) -> Option<(Matrix, Matrix)> {
 static LAST_VIEW_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_LOG_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_ACTOR: AtomicUsize = AtomicUsize::new(0);
+static LAST_PAUSED: AtomicBool = AtomicBool::new(false);
 static VIEW_CALLS: AtomicU64 = AtomicU64::new(0);
 
 pub fn now_ms() -> u64 {
@@ -370,19 +371,28 @@ unsafe extern "thiscall" fn camera_scene_node_detour(
     let previous = LAST_VIEW_MS.swap(now, Ordering::Relaxed);
     let changed_actor = LAST_ACTOR.swap(actor as usize, Ordering::Relaxed) != actor as usize;
     let pawn = *actor.add(0x450).cast::<*mut u8>();
-    let log_frame =
-        changed_actor || now.saturating_sub(LAST_LOG_MS.load(Ordering::Relaxed)) >= 1000;
+    // ALevelInfo::Pauser is shared by the pause interface and its submenus.
+    let level_info = *actor.add(0xf8).cast::<*mut u8>();
+    let paused = !level_info.is_null() && *level_info.add(0x668).cast::<usize>() != 0;
+    let changed_pause = LAST_PAUSED.swap(paused, Ordering::Relaxed) != paused;
+    if changed_pause {
+        crate::smoothing::reset();
+        log::info!("pause state: paused={paused}");
+    }
+    let log_frame = changed_actor
+        || changed_pause
+        || now.saturating_sub(LAST_LOG_MS.load(Ordering::Relaxed)) >= 1000;
     if log_frame {
         LAST_LOG_MS.store(now, Ordering::Relaxed);
         log::info!(
-            "render view: frame={frame} controller={actor:p} pawn={pawn:p} enabled={} FOV={fov}/{weapon_fov}",
+            "render view: frame={frame} controller={actor:p} pawn={pawn:p} enabled={} paused={paused} FOV={fov}/{weapon_fov}",
             is_enabled_atomic()
         );
     }
-    if changed_actor || !is_enabled_atomic() || pawn.is_null() {
+    if changed_actor || !is_enabled_atomic() || pawn.is_null() || paused {
         reset_lean_clamp();
     }
-    if !is_enabled_atomic() || pawn.is_null() {
+    if !is_enabled_atomic() || pawn.is_null() || paused {
         *CLEAN_SCENE.lock() = None;
         *RETICLE.lock() = ReticleState::Inactive;
         return scene;
