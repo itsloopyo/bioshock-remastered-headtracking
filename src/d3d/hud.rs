@@ -162,12 +162,12 @@ fn get_vtable_addrs() -> Result<VtableAddrs, &'static str> {
 // =========================================================================
 
 unsafe extern "system" fn hooked_present(this: *mut c_void, sync_interval: u32, flags: u32) -> i32 {
-    // First-frame chore: center the game window on its monitor if it
-    // launched in the top-left of an ultrawide. No-op after the first
-    // call, so users can still drag the window afterwards.
-    if let Some(sc) = IDXGISwapChain::from_raw_borrowed(&this) {
-        if let Ok(desc) = sc.GetDesc() {
-            crate::window::center_once(desc.OutputWindow);
+    static CENTERING_FAILED: AtomicBool = AtomicBool::new(false);
+    if !CENTERING_FAILED.load(Ordering::Relaxed) {
+        let sc = IDXGISwapChain::from_raw_borrowed(&this).unwrap();
+        if let Err(error) = crate::window::center(sc) {
+            CENTERING_FAILED.store(true, Ordering::Relaxed);
+            log::error!("window: centering failed: {error:?}");
         }
     }
 
