@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.0] - 2026-09-17
+
+### Added
+
+- standardise the log file, name every discovery failure, gate license notices
+- hook the render scene node and move the game's own reticle
+
+### Fixed
+
+- treat a repeated datagram as a repeat, not a new sample
+- re-sync THIRD-PARTY-NOTICES before cutting a release
+- mirror the vertical limit and restore the MIT grant
+- retry the tracker port every 500ms instead of every 5s
+- preserve originals across shim upgrades and uninstall failures
+- settle and confirm the window centering instead of moving once
+- suspend head tracking in the pause menu
+
 ## [0.4.0] - 2026-08-20
 
 ### Added
