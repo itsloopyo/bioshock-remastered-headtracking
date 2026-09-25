@@ -14,6 +14,14 @@ set "STATE_FILE=.headtracking-state.json"
 set "FRAMEWORK_TYPE=None"
 set "SHIM_MARKER=BioShock Head Tracking v"
 set "LEGACY_DLLS="
+:: Files install.cmd seeded write-if-absent. MUST list the same names as
+:: install.cmd's MOD_SEED_FILES, or an uninstall leaves the mod's config behind.
+set "MOD_SEED_FILES="
+:: Config files the uninstall leaves in place so the player's settings survive a
+:: reinstall: paths relative to the game folder, quoted when one holds a space.
+:: Keep the line when it is blank, or the list another mod's uninstall.cmd set
+:: in the same console is used instead.
+set "PRESERVE_FILES="
 
 set "MANAGED_SUBFOLDER="
 set "ASSEMBLY_DLL="
