@@ -20,12 +20,14 @@ extern "C" {
 // What the frozen reader in src/legacy_config gave, filled by the Rust side.
 struct BsrLegacyConfig {
     // 0: read. 1: no file. 2: a file that could not be read as UTF-8 text, where v0.5.0
-    // wrote its template over it and ran on the defaults.
+    // wrote its template over it and ran on the defaults; `reason` says why, in UTF-8.
     std::int32_t outcome;
     std::uint8_t world_space_yaw;
     std::int32_t yaw_mode_key;
     double local_smoothing;
     double remote_smoothing;
+    char reason[256];
+    std::uint32_t reason_len;
 };
 
 // Runs the frozen reader on the legacy file, a path of `len` UTF-16 units.

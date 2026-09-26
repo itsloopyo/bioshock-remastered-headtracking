@@ -74,10 +74,14 @@ cameraunlock::config::LegacyImport<Config> ConfigLegacyImport(BsrLegacyReader re
         MapLegacy(read, out);
         switch (read.outcome) {
             case kLegacyRead:
-            case kLegacyUnread:
                 return ImportResult::Imported({});
             case kLegacyNoFile:
                 return ImportResult::Absent({});
+            case kLegacyUnread:
+                // v0.5.0 wrote its template over such a file and ran on the defaults. The
+                // session runs on the same defaults, and the file is left for the player to fix
+                // and import at a later launch.
+                return ImportResult::Undecodable(std::string(read.reason, read.reason_len));
         }
         throw std::logic_error("the frozen reader gave outcome " + std::to_string(read.outcome));
     };

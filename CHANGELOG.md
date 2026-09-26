@@ -13,6 +13,7 @@
   - The setting for a feature that earlier versions shipped switched off while it was untested. It now follows the mod's default.
 - An older version of the mod reads `bioshock_headtrack.ini` and never reads `CameraUnlock.ini`, so a setting you change after updating is not in `bioshock_headtrack.ini`.
 - Deleting only `CameraUnlock.ini` makes the next start read `bioshock_headtrack.ini` again. To go back to the defaults, replace everything in `CameraUnlock.ini` with the defaults the README shows. Every setting they set to `default` then follows `Defaults.ini`.
+- A `bioshock_headtrack.ini` that is not UTF-8 text is not imported. That start runs on the defaults, as earlier versions did with such a file, saves nothing and says why in the log, and the next start tries again, so saving the file as UTF-8 imports it. Earlier versions wrote their defaults over such a file.
 - Hotkeys are written as key names, and each hotkey lists every key that triggers it, the Ctrl+Shift chord included: `ToggleKey=End, Ctrl+Shift+Y`. A `YawModeKey` code from `bioshock_headtrack.ini` is carried as its key name with `Ctrl+Shift+H` beside it, since that chord always fired it too: `YawModeKey=0x70` becomes `YawModeKey=F1, Ctrl+Shift+H`.
 - A hotkey bound to a plain key no longer fires while Ctrl and Shift are both held, so Ctrl+Shift with that key reaches only a binding that names the chord.
 - Holding `End` or `Page Up` no longer repeats its action every 0.3 seconds: each press acts once.

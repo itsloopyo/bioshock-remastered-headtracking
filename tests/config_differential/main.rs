@@ -226,6 +226,13 @@ fn from_migration(settings: &Settings, owner: &Owner) -> Effective {
     }
 }
 
+/// Whether the frozen reader finds a file there that it cannot read as text. v0.5.0 wrote
+/// its template over such a file and ran on the defaults; the migration leaves it as it is,
+/// runs on the same defaults and tries again at the next launch.
+fn unreadable(path: &Path) -> bool {
+    matches!(legacy_config::read(path), legacy_config::Outcome::Unread(e) if e.kind() != std::io::ErrorKind::NotFound)
+}
+
 /// The frozen reader, and what v0.5.0 ran on where it read no file.
 fn import_config(path: &Path) -> legacy_config::Config {
     match legacy_config::read(path) {
@@ -325,7 +332,7 @@ fn inputs() -> Vec<Input> {
         )),
     });
     // Saved by an editor in a code page: read_to_string fails, and v0.5.0 ran on the
-    // defaults after writing its template over the file.
+    // defaults after writing its template over the file. The migration defers.
     let mut code_page = newest.clone();
     code_page.extend_from_slice(b"; 40\xB0\n");
     out.push(Input {
@@ -403,6 +410,7 @@ fn test_comparison_one_oracle_against_import(root: &Path, inputs: &[Input]) -> V
 const CANONICAL: i32 = 0;
 const MIGRATED: i32 = 1;
 const CREATED: i32 = 2;
+const DEFERRED: i32 = 3;
 const FILE_ATTRIBUTE_READONLY: u32 = 1;
 
 /// A file as the tests hold it to: its bytes, its last write time and its attributes.
@@ -543,6 +551,36 @@ fn test_comparison_two_import_against_migration(
             stamp(defaults) == defaults_before,
             format!("{n}: Defaults.ini is left exactly as it was"),
         );
+        if unreadable(&m.legacy) {
+            check(
+                m.status == DEFERRED,
+                format!(
+                    "{n}: the import is deferred, status {}: {:?}",
+                    m.status, m.log
+                ),
+            );
+            check(
+                listing(&m.dir) == [LEGACY_NAME],
+                format!("{n}: the folder holds {LEGACY_NAME} and nothing else"),
+            );
+            check(
+                mentions(
+                    &m.log,
+                    "it is not UTF-8 text. Save it as UTF-8 to import it",
+                ),
+                format!("{n}: the log says why {LEGACY_NAME} was not imported"),
+            );
+            let (status, _, _) = Owner::at(&m.dir, defaults).load();
+            check(
+                status == DEFERRED && listing(&m.dir) == [LEGACY_NAME],
+                format!("{n}: the next launch tries the import again"),
+            );
+            check(
+                &stamp(&m.legacy) == legacy_before,
+                format!("{n}: the next launch leaves {LEGACY_NAME} as it was"),
+            );
+            continue;
+        }
         check(
             m.status == MIGRATED,
             format!(

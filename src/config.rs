@@ -21,6 +21,8 @@ struct LegacyConfig {
     yaw_mode_key: i32,
     local_smoothing: f64,
     remote_smoothing: f64,
+    reason: [u8; 256],
+    reason_len: u32,
 }
 
 const LEGACY_READ: i32 = 0;
@@ -170,22 +172,49 @@ unsafe extern "C" fn read_legacy(path: *const u16, len: usize, out: *mut LegacyC
     let path = PathBuf::from(std::ffi::OsString::from_wide(std::slice::from_raw_parts(
         path, len,
     )));
-    let (outcome, config) = match crate::legacy_config::read(&path) {
-        crate::legacy_config::Outcome::Read(config) => (LEGACY_READ, config),
-        crate::legacy_config::Outcome::Unread(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            (LEGACY_NO_FILE, crate::legacy_config::Config::default())
-        }
-        crate::legacy_config::Outcome::Unread(_) => {
-            (LEGACY_UNREAD, crate::legacy_config::Config::default())
-        }
+    let (outcome, config, why) = match crate::legacy_config::read(&path) {
+        crate::legacy_config::Outcome::Read(config) => (LEGACY_READ, config, String::new()),
+        crate::legacy_config::Outcome::Unread(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            LEGACY_NO_FILE,
+            crate::legacy_config::Config::default(),
+            String::new(),
+        ),
+        crate::legacy_config::Outcome::Unread(e) => (
+            LEGACY_UNREAD,
+            crate::legacy_config::Config::default(),
+            unread_reason(&e),
+        ),
     };
+    let mut reason = [0u8; 256];
+    let why = truncated(&why, reason.len());
+    reason[..why.len()].copy_from_slice(why.as_bytes());
     *out = LegacyConfig {
         outcome,
         world_space_yaw: u8::from(config.world_space_yaw),
         yaw_mode_key: config.yaw_mode_key,
         local_smoothing: config.local_smoothing,
         remote_smoothing: config.remote_smoothing,
+        reason,
+        reason_len: why.len() as u32,
     };
+}
+
+/// Why the frozen reader could not read a file that is there, for the player.
+fn unread_reason(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        "it is not UTF-8 text. Save it as UTF-8 to import it".to_string()
+    } else {
+        format!("it could not be read ({e})")
+    }
+}
+
+/// The longest prefix of `text` that fits in `limit` bytes and ends on a character.
+fn truncated(text: &str, limit: usize) -> &str {
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// The folder as the owner takes it: UTF-16, with its trailing separator.
@@ -415,6 +444,13 @@ mod tests {
             remote_smoothing(),
             crate::smoothing::DEFAULT_REMOTE_SMOOTHING
         );
+    }
+
+    #[test]
+    fn a_long_reason_is_cut_on_a_character() {
+        assert_eq!(truncated("ab\u{e9}", 3), "ab");
+        assert_eq!(truncated("ab\u{e9}", 4), "ab\u{e9}");
+        assert_eq!(truncated("ab", 256), "ab");
     }
 
     #[test]
