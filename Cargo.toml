@@ -15,6 +15,17 @@ name = "bioshock_headtrack"
 # the cdylib; the rlib is a build-tree file.
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Test-only entry points into cameraunlock-core (tests/support), which the config tests
+# call. `pixi run test-unit` turns it on; the shipped DLL is built without it.
+test-support = []
+
+[[test]]
+name = "config_differential"
+path = "tests/config_differential/main.rs"
+harness = false
+required-features = ["test-support"]
+
 [dependencies]
 parking_lot = "0.12.3"
 log = "0.4.22"

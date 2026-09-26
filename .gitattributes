@@ -98,3 +98,6 @@ docker-compose*.yml text eol=lf
 *.jar binary
 *.war binary
 *.ear binary
+
+# Byte-exact test data: the config differential test reads these files as a player's own.
+tests/config_differential/data/** -text

@@ -17,7 +17,9 @@ clean = "cargo clean"
 # `extern "thiscall"`, which is only supported on x86 targets and
 # fails to compile on 64-bit hosts.
 test = { depends-on = ["test-unit", "test-vectors"] }
-test-unit = "cargo test --target i686-pc-windows-msvc"
+# The unit tests, and the config differential test (tests/config_differential), which
+# reaches core through the test-support feature.
+test-unit = "cargo test --target i686-pc-windows-msvc --features test-support"
 # The shared pipeline conformance vectors, run against this port. The vectors,
 # the constants and every assertion live in cameraunlock-core; src/conformance.rs
 # is only the executor that drives our pipeline through them, and it answers
@@ -34,7 +36,9 @@ bench-quick = "cargo bench -- --quick"
 install = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Configuration Debug", depends-on = ["build"] }
 install-release = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Configuration Release", depends-on = ["build-release"] }
 validate-release = "powershell -ExecutionPolicy Bypass -File scripts/validate-release.ps1"
-package = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/package.ps1", depends-on = ["build-release"] }
+# Depends on test-unit rather than test: test-vectors fails against the pinned core's
+# vectors (the packet unit's columns and the HCAM trailer), which is separate work.
+package = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/package.ps1", depends-on = ["build-release", "test-unit"] }
 release = "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
 update-deps = "powershell -NoProfile -Command \"Write-Host 'No vendored dependencies to update (shim-only mod).'\""
 detect-game = "powershell -ExecutionPolicy Bypass -File scripts/detect-game.ps1"

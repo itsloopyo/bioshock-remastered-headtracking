@@ -23,6 +23,7 @@ mod d3d;
 mod engine_hook;
 mod hook_util;
 mod hotkeys;
+pub mod legacy_config;
 mod memory;
 mod opentrack;
 mod projection;
