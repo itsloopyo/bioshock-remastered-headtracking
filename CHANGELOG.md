@@ -16,7 +16,8 @@
 - A `bioshock_headtrack.ini` that is not UTF-8 text is not imported. That start runs on the defaults, as earlier versions did with such a file, saves nothing and says why in the log, and the next start tries again, so saving the file as UTF-8 imports it. Earlier versions wrote their defaults over such a file.
 - Hotkeys are written as key names, and each hotkey lists every key that triggers it, the Ctrl+Shift chord included: `ToggleKey=End, Ctrl+Shift+Y`. A `YawModeKey` code from `bioshock_headtrack.ini` is carried as its key name with `Ctrl+Shift+H` beside it, since that chord always fired it too: `YawModeKey=0x70` becomes `YawModeKey=F1, Ctrl+Shift+H`.
 - A hotkey bound to a plain key no longer fires while Ctrl and Shift are both held, so Ctrl+Shift with that key reaches only a binding that names the chord.
-- Holding `End` or `Page Up` no longer repeats its action every 0.3 seconds: each press acts once.
+- Each press of a hotkey acts once, however long it is held and however soon it follows the last press. Earlier versions repeated `End` and `Page Up` every 0.3 seconds while held, and ignored a press of any hotkey that came within 0.3 seconds of the last one that acted.
+- Hotkeys act only while the game's window is in front. Earlier versions also acted on a key pressed while another window was in front.
 
 ### Added
 

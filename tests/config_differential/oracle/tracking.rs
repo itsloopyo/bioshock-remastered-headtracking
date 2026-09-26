@@ -1,0 +1,604 @@
+#![allow(dead_code)]
+//! Global tracking state management
+//!
+//! Provides thread-safe global state shared between UDP receiver,
+//! hotkey handler, and DirectX render hook threads.
+//!
+//! # State Sharing
+//!
+//! The `GLOBAL_STATE` is a lazy-initialized, thread-safe singleton that provides:
+//!
+//! - **UDP Receiver Thread**: Updates yaw/pitch/roll values at ~250Hz
+//! - **Hotkey Handler Thread**: Modifies the enabled flag and tracking modes
+//! - **DirectX Render Hook**: Reads state each frame to apply camera rotation
+//!
+//! # Thread Safety
+//!
+//! Uses a hybrid approach for optimal performance:
+//! - **Atomics** for frequently accessed rotation values (lock-free)
+//! - **RwLock** for less frequently accessed state (toggle, tracking mode)
+//!
+//! This eliminates lock contention on the hot path (rotation reads at 60-120Hz)
+//! while maintaining proper synchronization for control operations.
+//!
+//! # Performance
+//!
+//! Rotation values use `AtomicU64` storing f64 bits for lock-free access.
+//! This provides ~10x faster reads compared to RwLock for the hot path.
+//!
+//! # Auto-enable
+//!
+//! `enabled` defaults to `true` so head tracking is active immediately when
+//! the game starts - users expect to plug in OpenTrack and have it just work.
+
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
+/// Atomic rotation storage for lock-free access on the hot path
+///
+/// Stores f64 rotation values as AtomicU64 bits for lock-free reads/writes.
+/// This eliminates RwLock contention on the render hook hot path.
+pub struct AtomicRotation {
+    yaw: AtomicU64,
+    pitch: AtomicU64,
+    roll: AtomicU64,
+}
+
+impl AtomicRotation {
+    /// Create new atomic rotation initialized to zero
+    pub const fn new() -> Self {
+        Self {
+            yaw: AtomicU64::new(0),
+            pitch: AtomicU64::new(0),
+            roll: AtomicU64::new(0),
+        }
+    }
+
+    /// Store rotation values (called by UDP receiver at ~250Hz)
+    #[inline(always)]
+    pub fn store(&self, yaw: f64, pitch: f64, roll: f64) {
+        self.yaw.store(yaw.to_bits(), Ordering::Release);
+        self.pitch.store(pitch.to_bits(), Ordering::Release);
+        self.roll.store(roll.to_bits(), Ordering::Release);
+    }
+
+    /// Load rotation values (called by render hook at frame rate)
+    #[inline(always)]
+    pub fn load(&self) -> (f64, f64, f64) {
+        (
+            f64::from_bits(self.yaw.load(Ordering::Acquire)),
+            f64::from_bits(self.pitch.load(Ordering::Acquire)),
+            f64::from_bits(self.roll.load(Ordering::Acquire)),
+        )
+    }
+
+    /// Get current yaw value
+    #[inline(always)]
+    pub fn yaw(&self) -> f64 {
+        f64::from_bits(self.yaw.load(Ordering::Acquire))
+    }
+
+    /// Get current pitch value
+    #[inline(always)]
+    pub fn pitch(&self) -> f64 {
+        f64::from_bits(self.pitch.load(Ordering::Acquire))
+    }
+
+    /// Get current roll value
+    #[inline(always)]
+    pub fn roll(&self) -> f64 {
+        f64::from_bits(self.roll.load(Ordering::Acquire))
+    }
+}
+
+impl std::fmt::Debug for AtomicRotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (yaw, pitch, roll) = self.load();
+        f.debug_struct("AtomicRotation")
+            .field("yaw", &yaw)
+            .field("pitch", &pitch)
+            .field("roll", &roll)
+            .finish()
+    }
+}
+
+impl Default for AtomicRotation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Global tracking state shared across all threads
+#[derive(Debug)]
+pub struct TrackingState {
+    /// Master enable flag (End / Ctrl+Shift+Y).
+    pub enabled: bool,
+
+    /// Current yaw rotation from OpenTrack (degrees) - LEGACY, use atomic_rotation
+    pub yaw: f64,
+
+    /// Current pitch rotation from OpenTrack (degrees) - LEGACY, use atomic_rotation
+    pub pitch: f64,
+
+    /// Current roll rotation from OpenTrack (degrees) - LEGACY, use atomic_rotation
+    pub roll: f64,
+
+    /// Rotational-tracking flag, cycled by the tracking-mode hotkey
+    /// (Page Up / Ctrl+Shift+G) alongside `position_enabled`.
+    pub rotation_enabled: bool,
+
+    /// 6DOF positional tracking flag, cycled by the tracking-mode
+    /// hotkey (Page Up / Ctrl+Shift+G) alongside `rotation_enabled`.
+    pub position_enabled: bool,
+
+    /// True when in active gameplay, false during menus/cutscenes
+    pub gameplay_active: bool,
+
+    /// Debounce timer for the tracking-enable toggle.
+    pub last_toggle_time: Instant,
+
+    /// Debounce timer for the tracking-mode cycle hotkey.
+    pub last_cycle_mode_time: Instant,
+
+    /// Runtime yaw mode. True means horizon-locked world-space yaw.
+    pub world_space_yaw: bool,
+
+    /// Debounce timer for the yaw-mode toggle hotkey.
+    pub last_yaw_mode_time: Instant,
+
+    /// Previous pressed state for the yaw-mode binding.
+    pub yaw_mode_was_down: bool,
+
+    /// Signal for threads to shutdown
+    pub shutdown_requested: bool,
+}
+
+/// Lock-free atomic rotation values for hot path access
+///
+/// Use this for reading rotation values in the render hook to avoid
+/// RwLock contention. Updated by UDP receiver, read by render hook.
+pub static ATOMIC_ROTATION: AtomicRotation = AtomicRotation::new();
+
+/// Lock-free atomic position (x, y, z) values from the OpenTrack
+/// packet, in centimetres. Reuses the `AtomicRotation` slot type
+/// (three lock-free f64 fields) for consistency with rotation -
+/// the field names are misnomers in this case but the storage is
+/// the same.
+pub static ATOMIC_POSITION: AtomicRotation = AtomicRotation::new();
+
+/// Monotonic sample-sequence counter, bumped once per OpenTrack packet
+/// after the rotation+position atomics are written. The smoothing
+/// pipeline compares this to its last-seen value to detect
+/// `is_new_sample` per render frame; without it, a low-rate tracker
+/// (60Hz phone) on a high-refresh display (120Hz+) would re-feed the
+/// same sample to the interpolator on every frame and the EMA
+/// sample-interval estimate would converge to the frame interval
+/// instead of the true sample interval.
+pub static ATOMIC_SAMPLE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Atomic enabled flag for lock-free access
+pub static ATOMIC_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Atomic gameplay_active flag for lock-free access
+/// Starts true so tracking works immediately (state detector also defaults to Gameplay)
+pub static ATOMIC_GAMEPLAY_ACTIVE: AtomicBool = AtomicBool::new(true);
+
+pub static ATOMIC_WORLD_SPACE_YAW: AtomicBool = AtomicBool::new(true);
+
+impl Default for TrackingState {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            enabled: true,
+            yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            rotation_enabled: true,
+            position_enabled: true,
+            // Start active - state detector defaults to Gameplay
+            gameplay_active: true,
+            last_toggle_time: now,
+            last_cycle_mode_time: now,
+            world_space_yaw: ATOMIC_WORLD_SPACE_YAW.load(Ordering::Acquire),
+            last_yaw_mode_time: now - std::time::Duration::from_millis(crate::hotkeys::DEBOUNCE_MS),
+            yaw_mode_was_down: false,
+            shutdown_requested: false,
+        }
+    }
+}
+
+impl TrackingState {
+    /// Toggle enabled state
+    pub fn toggle(&mut self) {
+        self.enabled = !self.enabled;
+        // Sync to atomic enabled flag
+        ATOMIC_ENABLED.store(self.enabled, Ordering::Release);
+        // The smoothing pipeline doesn't tick while tracking is off
+        // (engine_hook returns early). Wipe its `last_frame` instant
+        // so the next re-enable doesn't inject a multi-second dt into
+        // the interpolator.
+        crate::smoothing::reset();
+        log::info!(
+            "Head tracking {}",
+            if self.enabled { "enabled" } else { "disabled" }
+        );
+    }
+
+    /// Advance the rotation/position cycle by one step. The cycle has
+    /// three states: both axes on (normal), rotation only, position
+    /// only. From "position only" the next press wraps back to "both
+    /// on".
+    pub fn cycle_tracking_mode(&mut self) {
+        let (next_rot, next_pos) = match (self.rotation_enabled, self.position_enabled) {
+            (true, true) => (true, false),
+            (true, false) => (false, true),
+            _ => (true, true),
+        };
+        self.rotation_enabled = next_rot;
+        self.position_enabled = next_pos;
+        ATOMIC_ROTATION_ENABLED.store(next_rot, Ordering::Release);
+        ATOMIC_POSITION_ENABLED.store(next_pos, Ordering::Release);
+        let label = match (next_rot, next_pos) {
+            (true, true) => "rotation + position",
+            (true, false) => "rotation only",
+            (false, true) => "position only",
+            (false, false) => "all axes off",
+        };
+        log::info!("Tracking mode: {label}");
+    }
+
+    pub fn toggle_yaw_mode(&mut self) {
+        self.world_space_yaw = !self.world_space_yaw;
+        ATOMIC_WORLD_SPACE_YAW.store(self.world_space_yaw, Ordering::Release);
+        log::info!(
+            "Yaw mode: {}",
+            if self.world_space_yaw {
+                "world-space"
+            } else {
+                "camera-local"
+            }
+        );
+    }
+}
+
+pub fn set_world_space_yaw_initial(enabled: bool) {
+    ATOMIC_WORLD_SPACE_YAW.store(enabled, Ordering::Release);
+}
+
+#[inline(always)]
+pub fn is_world_space_yaw_atomic() -> bool {
+    ATOMIC_WORLD_SPACE_YAW.load(Ordering::Acquire)
+}
+
+/// Get the tracker's rotation values using lock-free atomics
+///
+/// This is the optimized hot path for reading rotation values in the render hook.
+/// Uses atomic operations instead of RwLock for ~10x faster access.
+///
+/// # Performance
+///
+/// This function avoids any lock acquisition and uses memory ordering
+/// to ensure proper synchronization between the UDP receiver (writer)
+/// and render hook (reader).
+#[inline(always)]
+pub fn get_rotation_atomic() -> (f64, f64, f64) {
+    ATOMIC_ROTATION.load()
+}
+
+/// Check if head tracking is enabled using lock-free atomic
+#[inline(always)]
+pub fn is_enabled_atomic() -> bool {
+    ATOMIC_ENABLED.load(Ordering::Acquire)
+}
+
+/// Check if gameplay is active using lock-free atomic
+#[inline(always)]
+pub fn is_gameplay_active_atomic() -> bool {
+    ATOMIC_GAMEPLAY_ACTIVE.load(Ordering::Acquire)
+}
+
+/// Set gameplay active state atomically
+#[inline(always)]
+pub fn set_gameplay_active_atomic(active: bool) {
+    ATOMIC_GAMEPLAY_ACTIVE.store(active, Ordering::Release);
+}
+
+/// Serialises the tests that drive the process-global tracking atomics and the
+/// smoothing pipeline. `cargo test` runs test functions on parallel threads and
+/// these statics are shared, so a test that stores a pose and then asserts on it
+/// is otherwise racing every other test that writes one.
+#[cfg(test)]
+pub(crate) static GLOBAL_ATOMICS_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Update rotation values atomically (called by UDP receiver)
+#[inline(always)]
+pub fn update_rotation_atomic(yaw: f64, pitch: f64, roll: f64) {
+    ATOMIC_ROTATION.store(yaw, pitch, roll);
+}
+
+/// Update raw position values atomically (called by UDP receiver).
+/// Inputs are OpenTrack-frame centimetres: x = right, y = up,
+/// z = away-from-screen.
+#[inline(always)]
+pub fn update_position_atomic(x: f64, y: f64, z: f64) {
+    ATOMIC_POSITION.store(x, y, z);
+}
+
+/// Get the tracker's position deltas in head-frame centimetres:
+/// `(right, up, forward)`. Sign conventions, all 1:1 with no
+/// sensitivity scaling:
+///   - `right`   = `-x` - OpenTrack X is inverted relative to
+///     what BSR's camera basis expects, so the lateral axis gets a
+///     leading minus.
+///   - `up`      = `y` - passes through.
+///   - `forward` = `-z` - OpenTrack `+Z = back`, we want
+///     `+forward = lean toward screen`, so negate.
+#[inline(always)]
+pub fn get_position_atomic() -> (f64, f64, f64) {
+    let (x, y, z) = ATOMIC_POSITION.load();
+    (-x, y, -z)
+}
+
+/// Lock-free check for the rotation-tracking flag. Mirrored from
+/// `TrackingState::rotation_enabled` so the engine hook can gate the
+/// rotation block per frame without a lock.
+pub static ATOMIC_ROTATION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+#[inline(always)]
+pub fn is_rotation_enabled_atomic() -> bool {
+    ATOMIC_ROTATION_ENABLED.load(Ordering::Acquire)
+}
+
+/// Lock-free check for the position-tracking flag. The hotkey
+/// thread mutates `position_enabled` under the global write-lock;
+/// this static mirror is updated alongside it for hot-path reads.
+pub static ATOMIC_POSITION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+#[inline(always)]
+pub fn is_position_enabled_atomic() -> bool {
+    ATOMIC_POSITION_ENABLED.load(Ordering::Acquire)
+}
+
+/// Lazy-initialized global state, wrapped in Arc<RwLock<>> for thread safety
+///
+/// # Thread Safety
+///
+/// - Use `.read()` to acquire a read lock for reading state
+/// - Use `.write()` to acquire a write lock for modifying state
+/// - Read locks can be held simultaneously by multiple threads
+/// - Write locks are exclusive
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// // Reading state (in render hook)
+/// let (yaw, pitch, roll) = {
+///     let state = GLOBAL_STATE.read();
+///     (state.yaw, state.pitch, state.roll)
+/// };
+///
+/// // Modifying state (in hotkey handler)
+/// {
+///     let mut state = GLOBAL_STATE.write();
+///     state.toggle();
+/// }
+/// ```
+pub static GLOBAL_STATE: Lazy<Arc<RwLock<TrackingState>>> =
+    Lazy::new(|| Arc::new(RwLock::new(TrackingState::default())));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_enabled_true() {
+        let state = TrackingState::default();
+        assert!(state.enabled, "Default state should have enabled=true");
+    }
+
+    #[test]
+    fn test_default_rotations_zero() {
+        let state = TrackingState::default();
+        assert!(
+            (state.yaw - 0.0).abs() < f64::EPSILON,
+            "Default yaw should be 0"
+        );
+        assert!(
+            (state.pitch - 0.0).abs() < f64::EPSILON,
+            "Default pitch should be 0"
+        );
+        assert!(
+            (state.roll - 0.0).abs() < f64::EPSILON,
+            "Default roll should be 0"
+        );
+    }
+
+    #[test]
+    fn test_default_gameplay_active() {
+        let state = TrackingState::default();
+        assert!(
+            state.gameplay_active,
+            "Default gameplay_active should be true for immediate tracking"
+        );
+    }
+
+    #[test]
+    fn test_default_shutdown_not_requested() {
+        let state = TrackingState::default();
+        assert!(
+            !state.shutdown_requested,
+            "Default shutdown_requested should be false"
+        );
+    }
+
+    #[test]
+    fn test_toggle_changes_state() {
+        let mut state = TrackingState::default();
+        assert!(state.enabled);
+
+        state.toggle();
+        assert!(!state.enabled, "Toggle should disable when enabled");
+
+        state.toggle();
+        assert!(state.enabled, "Toggle should enable when disabled");
+    }
+
+    #[test]
+    fn test_toggle_logs_message() {
+        // Verify toggle method logs appropriately
+        // This is a structural test - the actual logging is verified by log output
+        let mut state = TrackingState::default();
+        state.toggle(); // Should log "Head tracking disabled"
+        state.toggle(); // Should log "Head tracking enabled"
+                        // No assertions needed - just verifying no panics
+    }
+
+    #[test]
+    fn test_global_state_thread_safety() {
+        // Verify we can read and write from the global state
+        {
+            let mut state = GLOBAL_STATE.write();
+            state.yaw = 42.0;
+        }
+
+        {
+            let state = GLOBAL_STATE.read();
+            assert!((state.yaw - 42.0).abs() < 0.0001);
+        }
+
+        // Reset for other tests
+        {
+            let mut state = GLOBAL_STATE.write();
+            state.yaw = 0.0;
+        }
+    }
+
+    #[test]
+    fn test_global_state_multiple_reads() {
+        // RwLock should allow multiple simultaneous readers
+        let state1 = GLOBAL_STATE.read();
+        let state2 = GLOBAL_STATE.read();
+
+        // Both should see the same value
+        assert_eq!(state1.enabled, state2.enabled);
+
+        // Drop locks explicitly
+        drop(state1);
+        drop(state2);
+    }
+
+    // =========================================================================
+    // Atomic Rotation Tests (Optimized Hot Path)
+    // =========================================================================
+
+    #[test]
+    fn test_atomic_rotation_store_load() {
+        let rotation = AtomicRotation::new();
+
+        // Store values
+        rotation.store(45.0, 30.0, 15.0);
+
+        // Load and verify
+        let (yaw, pitch, roll) = rotation.load();
+        assert!((yaw - 45.0).abs() < f64::EPSILON);
+        assert!((pitch - 30.0).abs() < f64::EPSILON);
+        assert!((roll - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_atomic_rotation_individual_accessors() {
+        let rotation = AtomicRotation::new();
+        rotation.store(10.0, 20.0, 30.0);
+
+        assert!((rotation.yaw() - 10.0).abs() < f64::EPSILON);
+        assert!((rotation.pitch() - 20.0).abs() < f64::EPSILON);
+        assert!((rotation.roll() - 30.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_atomic_rotation_negative_values() {
+        let rotation = AtomicRotation::new();
+        rotation.store(-45.0, -30.0, -15.0);
+
+        let (yaw, pitch, roll) = rotation.load();
+        assert!((yaw - (-45.0)).abs() < f64::EPSILON);
+        assert!((pitch - (-30.0)).abs() < f64::EPSILON);
+        assert!((roll - (-15.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_global_atomic_rotation() {
+        let _guard = GLOBAL_ATOMICS_TEST_LOCK.lock();
+        // Test the global ATOMIC_ROTATION static
+        update_rotation_atomic(90.0, 45.0, 22.5);
+
+        let (yaw, pitch, roll) = ATOMIC_ROTATION.load();
+        assert!((yaw - 90.0).abs() < f64::EPSILON);
+        assert!((pitch - 45.0).abs() < f64::EPSILON);
+        assert!((roll - 22.5).abs() < f64::EPSILON);
+
+        // Reset for other tests
+        update_rotation_atomic(0.0, 0.0, 0.0);
+    }
+
+    #[test]
+    fn test_atomic_enabled_flag() {
+        // Default should be true (auto-enable).
+        assert!(is_enabled_atomic());
+
+        // Toggle off
+        ATOMIC_ENABLED.store(false, Ordering::Release);
+        assert!(!is_enabled_atomic());
+
+        // Toggle on
+        ATOMIC_ENABLED.store(true, Ordering::Release);
+        assert!(is_enabled_atomic());
+    }
+
+    #[test]
+    fn test_atomic_gameplay_active_flag() {
+        // Set active
+        set_gameplay_active_atomic(true);
+        assert!(is_gameplay_active_atomic());
+
+        // Set inactive
+        set_gameplay_active_atomic(false);
+        assert!(!is_gameplay_active_atomic());
+    }
+
+    #[test]
+    fn test_atomic_rotation_thread_safety() {
+        use std::thread;
+
+        let _guard = GLOBAL_ATOMICS_TEST_LOCK.lock();
+
+        // Spawn multiple writers
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                thread::spawn(move || {
+                    for j in 0..100 {
+                        let val = (i * 100 + j) as f64;
+                        ATOMIC_ROTATION.store(val, val, val);
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all writers
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Verify we can still read (no corruption)
+        let (yaw, pitch, roll) = ATOMIC_ROTATION.load();
+        assert!(yaw.is_finite());
+        assert!(pitch.is_finite());
+        assert!(roll.is_finite());
+
+        // Reset
+        ATOMIC_ROTATION.store(0.0, 0.0, 0.0);
+    }
+}

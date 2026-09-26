@@ -127,7 +127,8 @@ a chord, so use whichever your keyboard has:
 
 Change the keys in the [configuration](#configuration), as key names separated
 by commas: `ToggleKey=End, Ctrl+Shift+Y`. A key without Ctrl or Shift does not
-fire while Ctrl and Shift are both held.
+fire while Ctrl and Shift are both held. Hotkeys act only while the game's window
+is in front, once per press.
 
 The tracking mode and the yaw mode are saved to `CameraUnlock.ini` as soon as
 you change them, so the next start picks up where you left off. Toggling

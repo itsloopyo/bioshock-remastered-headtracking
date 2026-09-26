@@ -1,23 +1,32 @@
 //! The differential test for the config conversion. Every input is read three ways:
 //!
-//!   the oracle     the reader of v0.5.0, the newest published build: oracle/config.rs is
-//!                  `git show v0.5.0:src/config.rs`, byte for byte, with the two crate items it
-//!                  used restated below at their v0.5.0 values. It reads a relative path and
-//!                  keeps its settings in statics, so each reading runs in a process of its own
-//!                  (this binary, started with --oracle <folder>)
-//!   the import     the frozen reader in src/legacy_config/
+//!   the oracle     v0.5.0, the newest published build: its reader and the code that turns
+//!                  what it read into the state the game starts in. oracle/<name>.rs is
+//!                  `git show v0.5.0:src/<name>.rs`, byte for byte, for config, tracking,
+//!                  hotkeys, smoothing and opentrack, each a module of this crate's root under
+//!                  its own name, since they reach each other as crate::<name>. The reader
+//!                  reads a relative path and keeps its settings in statics, so each reading
+//!                  runs in a process of its own (this binary, started with --oracle <folder>)
+//!   the import     the frozen reader in src/legacy_config/, and v0.5.0's startup state
 //!   the migration  the config owner in a folder holding only bioshock_headtrack.ini, importing
 //!                  it into a new CameraUnlock.ini, then the canonical reader and the table on
 //!                  what it wrote
 //!
 //! Each reading is reduced to what a player's file decides: every setting, the tracking state
-//! the mod starts in and the keys it registers.
+//! the mod starts in, the keys it registers and how those keys fire.
+//!
+//! Two parts of v0.5.0 are restated, not run. Its hotkey bindings are the literals of
+//! hotkeys.rs tick(), which is private and reads the live keyboard; the test checks each
+//! against the source text. Its lean clamp was C++ built with a default LeanClampSettings,
+//! whose release_smoothing is 0.9 at v0.5.0's core pin, c480d8a.
 //!
 //! Comparison 1, oracle against import, finds nothing: no commit since v0.5.0 changed how the
-//! file is read. Comparison 2, import against migration, finds nothing either: no approved
-//! change or normalisation in core's data/config-format.json applies to what v0.5.0 read. It
-//! runs over a Defaults.ini at the built-in values and over one a player changed, since the
-//! migration writes default exactly where the imported value equals what Defaults.ini gives.
+//! file is read. Comparison 2, import against migration, finds one change, listed in
+//! KNOWN_CHANGES with its commit: how the hotkeys fire, which moved to core's poller. Otherwise
+//! no approved change or normalisation in core's data/config-format.json applies to what
+//! v0.5.0 read. It runs over a Defaults.ini at the built-in values and over one a player
+//! changed, since the migration writes default exactly where the imported value equals what
+//! Defaults.ini gives.
 //!
 //! The distinct migrated files go to target/config-differential-migrated, where
 //! lint-migrated.mjs runs core's canonical config lint over them after this binary.
@@ -28,9 +37,13 @@
 //! file or a launcher seed.
 //!
 //! Published tags: v0.1.0, v0.1.1, v0.2.0, v0.2.2, v0.3.0, v0.3.1, v0.3.2, v0.3.3, v0.3.5,
-//! v0.3.6, v0.4.0 and v0.5.0; there is no dev pre-release. SHA-256 of the frozen files:
-//!   oracle/config.rs            5d3b80b8b5940728acbf91e3f72c36f8b928d8951067d8a897d6a147d670ca6c,
-//!                               equal to `git show v0.5.0:src/config.rs`
+//! v0.3.6, v0.4.0 and v0.5.0; there is no dev pre-release. SHA-256 of the frozen files, the
+//! oracle's each equal to `git show v0.5.0:src/<name>.rs`:
+//!   oracle/config.rs            5d3b80b8b5940728acbf91e3f72c36f8b928d8951067d8a897d6a147d670ca6c
+//!   oracle/hotkeys.rs           53eec46f20ba018a61b4b46cbc8630025b6cf5d846d5a9a98dd45903489ae5ae
+//!   oracle/opentrack.rs         eb01bc7cfd47c6e8a593b7a44a6e920e5df7bccc05418ea9e0649d6cf7d11ff9
+//!   oracle/smoothing.rs         85c553b04d17cc080476b4ed5c133a3d7b5a75efc7b4a61c486fc0f365673687
+//!   oracle/tracking.rs          30b2e9b16d64828f8f31d71bf423baee0bb0fa4123aeaf41a1a4506f2e8cc923
 //!   src/legacy_config/mod.rs    dfcf17c06fb1b6ac0de35821e9b069144e7475f02ffea9210637beceb1f4cab2
 //! The frozen reader is Rust's standard library and nothing of cameraunlock-core.
 
@@ -47,33 +60,61 @@ mod support;
 
 use support::{corpus, Hotkey};
 
-mod smoothing {
-    // src/smoothing.rs at v0.5.0.
-    pub const DEFAULT_LOCAL_SMOOTHING: f64 = 0.0;
-    pub const DEFAULT_REMOTE_SMOOTHING: f64 = 0.15;
-}
-
-mod tracking {
-    // src/tracking.rs at v0.5.0: ATOMIC_WORLD_SPACE_YAW starts true.
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    static WORLD_SPACE_YAW: AtomicBool = AtomicBool::new(true);
-
-    pub fn set_world_space_yaw_initial(enabled: bool) {
-        WORLD_SPACE_YAW.store(enabled, Ordering::Release);
-    }
-
-    pub fn is_world_space_yaw_atomic() -> bool {
-        WORLD_SPACE_YAW.load(Ordering::Acquire)
-    }
-}
-
 #[path = "oracle/config.rs"]
 #[allow(dead_code, unused_imports)]
-mod oracle;
+mod config;
+#[path = "oracle/hotkeys.rs"]
+#[allow(dead_code, unused_imports)]
+mod hotkeys;
+#[path = "oracle/opentrack.rs"]
+#[allow(dead_code, unused_imports)]
+mod opentrack;
+#[path = "oracle/smoothing.rs"]
+#[allow(dead_code, unused_imports)]
+mod smoothing;
+#[path = "oracle/tracking.rs"]
+#[allow(unused_imports)]
+mod tracking;
 
 const LEGACY_NAME: &str = "bioshock_headtrack.ini";
 const CTRL_SHIFT: u32 = 3;
+
+/// How a hotkey's bindings fire, which the build decides and the file does not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Firing {
+    /// A press counts only while the game's window is in front.
+    foreground_only: bool,
+    /// A binding with no modifiers also fires while Ctrl and Shift are both held.
+    plain_under_ctrl_shift: bool,
+    /// Held down, the hotkey acts again after this many ms; None, once per press.
+    repeat_held_ms: Option<u64>,
+    /// A press this many ms or less after the last one that acted does nothing.
+    ignored_within_ms: u64,
+}
+
+/// Core's HotkeyPoller with RegisterKeyBindings: a key fires on the poll that sees it go down
+/// (hotkey_poller.cpp Poll), only while this process owns the foreground window
+/// (IsOwnProcessForeground), and a binding with no modifiers not while Ctrl and Shift are
+/// both held (key_binding_registration.h BindingFires).
+const CORE_FIRING: Firing = Firing {
+    foreground_only: true,
+    plain_under_ctrl_shift: false,
+    repeat_held_ms: None,
+    ignored_within_ms: 0,
+};
+
+/// v0.5.0's hotkeys.rs: binding_down takes the nav key whatever else is held, nothing checks
+/// the foreground window, toggle and cycle go through fired(), which acts again every
+/// DEBOUNCE_MS while held, and the yaw key through fired_edge(), once per press, both
+/// ignoring a press within DEBOUNCE_MS of the last one that acted.
+fn v050_firing(edge: bool) -> Firing {
+    Firing {
+        foreground_only: false,
+        plain_under_ctrl_shift: true,
+        repeat_held_ms: (!edge).then_some(hotkeys::DEBOUNCE_MS),
+        ignored_within_ms: hotkeys::DEBOUNCE_MS,
+    }
+}
 
 /// Everything a config file decides, as the game acts on it. Hotkeys are (modifiers, virtual
 /// key) pairs, modifiers as core's KeyModifiers numbers.
@@ -91,35 +132,82 @@ struct Effective {
     toggle: Vec<(u32, i32)>,
     cycle_mode: Vec<(u32, i32)>,
     yaw_mode: Vec<(u32, i32)>,
+    toggle_firing: Firing,
+    cycle_mode_firing: Firing,
+    yaw_mode_firing: Firing,
 }
 
-/// v0.5.0 as it ran on what its reader gave: tracking on at start, both axes on, port 4242,
-/// a lean held off the walls on every frame at LeanClampSettings' release_smoothing of 0.9
-/// (src/lean_clamp.cpp and core's lean_clamp.h at v0.5.0's pin, c480d8a), End or
-/// Ctrl+Shift+Y, PageUp or Ctrl+Shift+G, and the yaw key or Ctrl+Shift+H.
-fn from_legacy(world_space_yaw: bool, yaw_mode_key: i32, local: f64, remote: f64) -> Effective {
+/// The state v0.5.0 started in apart from what its reader gave, as its compiled statics hold
+/// it: initialize_mod touched GLOBAL_STATE and started the receiver on OPENTRACK_PORT, and
+/// the render hook read the atomics.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Startup {
+    enabled: bool,
+    rotation_enabled: bool,
+    position_enabled: bool,
+    udp_port: u16,
+}
+
+fn v050_startup() -> Startup {
+    let state = tracking::GLOBAL_STATE.read();
+    let startup = Startup {
+        enabled: tracking::is_enabled_atomic(),
+        rotation_enabled: tracking::is_rotation_enabled_atomic(),
+        position_enabled: tracking::is_position_enabled_atomic(),
+        udp_port: opentrack::OPENTRACK_PORT,
+    };
+    assert_eq!(
+        (
+            state.enabled,
+            state.rotation_enabled,
+            state.position_enabled
+        ),
+        (
+            startup.enabled,
+            startup.rotation_enabled,
+            startup.position_enabled
+        ),
+        "v0.5.0's GLOBAL_STATE starts where its atomics do"
+    );
+    startup
+}
+
+/// v0.5.0 as it ran on what its reader gave: its startup state, a lean held off the walls on
+/// every frame at a release of 0.9, and the bindings and firing of its hotkeys.rs, the yaw key
+/// the one the reader gave.
+fn from_legacy(
+    startup: Startup,
+    world_space_yaw: bool,
+    yaw_mode_key: i32,
+    local: f64,
+    remote: f64,
+) -> Effective {
     Effective {
-        enable_on_startup: true,
-        udp_port: 4242,
+        enable_on_startup: startup.enabled,
+        udp_port: startup.udp_port,
         world_space_yaw,
         local_smoothing_bits: local.to_bits(),
         remote_smoothing_bits: remote.to_bits(),
-        rotation_enabled: true,
-        position_enabled: true,
+        rotation_enabled: startup.rotation_enabled,
+        position_enabled: startup.position_enabled,
         collision_enabled: true,
         collision_release_smoothing_bits: 0.9_f32.to_bits(),
         toggle: vec![(0, 0x23), (CTRL_SHIFT, 'Y' as i32)],
         cycle_mode: vec![(0, 0x21), (CTRL_SHIFT, 'G' as i32)],
         yaw_mode: vec![(0, yaw_mode_key), (CTRL_SHIFT, 'H' as i32)],
+        toggle_firing: v050_firing(false),
+        cycle_mode_firing: v050_firing(false),
+        yaw_mode_firing: v050_firing(true),
     }
 }
 
-fn differences(a: &Effective, b: &Effective) -> Vec<String> {
+/// Each difference as (field, both values).
+fn differences(a: &Effective, b: &Effective) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     macro_rules! field {
         ($f:ident) => {
             if a.$f != b.$f {
-                out.push(format!("{} {:?} / {:?}", stringify!($f), a.$f, b.$f));
+                out.push((stringify!($f), format!("{:?} / {:?}", a.$f, b.$f)));
             }
         };
     }
@@ -135,7 +223,52 @@ fn differences(a: &Effective, b: &Effective) -> Vec<String> {
     field!(toggle);
     field!(cycle_mode);
     field!(yaw_mode);
+    field!(toggle_firing);
+    field!(cycle_mode_firing);
+    field!(yaw_mode_firing);
     out
+}
+
+/// What comparison 2 finds that the conversion changed on purpose, with the commit that did,
+/// each in CHANGELOG.md. Each must still occur, so the list cannot outlive the change.
+const KNOWN_CHANGES: &[(&str, &str)] = &[
+    ("toggle_firing", "71b80d6: the hotkeys run on core's poller"),
+    (
+        "cycle_mode_firing",
+        "71b80d6: the hotkeys run on core's poller",
+    ),
+    (
+        "yaw_mode_firing",
+        "71b80d6: the hotkeys run on core's poller",
+    ),
+];
+
+/// The literals from_legacy restates are the ones in oracle/hotkeys.rs, which the oracle
+/// cannot run: tick() is private and reads the live keyboard.
+fn test_the_v050_hotkeys_are_its_source() -> Vec<String> {
+    let source = include_str!("oracle/hotkeys.rs");
+    [
+        "const VK_SHIFT: i32 = 0x10;",
+        "const VK_CONTROL: i32 = 0x11;",
+        "const VK_END: i32 = 0x23;",
+        "const VK_PAGE_UP: i32 = 0x21;",
+        "const VK_H: i32 = 0x48;",
+        "const VK_G: i32 = 0x47;",
+        "const VK_Y: i32 = 0x59;",
+        "is_down(nav_vk) || (is_down(VK_CONTROL) && is_down(VK_SHIFT) && is_down(chord_letter_vk))",
+        "if fired(VK_END, VK_Y, &mut state.last_toggle_time, debounce) {",
+        "if fired(VK_PAGE_UP, VK_G, &mut state.last_cycle_mode_time, debounce) {",
+        "    if fired_edge(\n        yaw_mode_key,\n        VK_H,",
+    ]
+    .iter()
+    .filter(|line| !source.contains(*line))
+    .map(|line| format!("oracle/hotkeys.rs has no {line:?}"))
+    .chain(
+        source
+            .contains("GetForegroundWindow")
+            .then(|| "oracle/hotkeys.rs checks the foreground window".to_string()),
+    )
+    .collect()
 }
 
 // ---- files ----------------------------------------------------------------------------------
@@ -187,24 +320,37 @@ fn read_oracle(root: &Path, input: &Input) -> Effective {
     );
     let text = String::from_utf8(output.stdout).unwrap();
     let fields: Vec<&str> = text.split_whitespace().collect();
+    let flag = |i: usize| fields[i] == "1";
     from_legacy(
-        fields[0] == "1",
+        Startup {
+            enabled: flag(4),
+            rotation_enabled: flag(5),
+            position_enabled: flag(6),
+            udp_port: fields[7].parse().unwrap(),
+        },
+        flag(0),
         fields[1].parse().unwrap(),
         f64::from_bits(u64::from_str_radix(fields[2], 16).unwrap()),
         f64::from_bits(u64::from_str_radix(fields[3], 16).unwrap()),
     )
 }
 
-/// The oracle's side of read_oracle: v0.5.0's load() in `dir`, printed.
+/// The oracle's side of read_oracle: v0.5.0's initialize_mod in `dir` up to the threads and
+/// hooks it starts, config::load() and then GLOBAL_STATE, printed.
 fn run_oracle(dir: &Path) {
     std::env::set_current_dir(dir).unwrap();
-    oracle::load();
+    config::load();
+    let startup = v050_startup();
     println!(
-        "{} {} {:016x} {:016x}",
+        "{} {} {:016x} {:016x} {} {} {} {}",
         u8::from(tracking::is_world_space_yaw_atomic()),
-        oracle::yaw_mode_key(),
-        oracle::local_smoothing().to_bits(),
-        oracle::remote_smoothing().to_bits()
+        config::yaw_mode_key(),
+        config::local_smoothing().to_bits(),
+        config::remote_smoothing().to_bits(),
+        u8::from(startup.enabled),
+        u8::from(startup.rotation_enabled),
+        u8::from(startup.position_enabled),
+        startup.udp_port
     );
 }
 
@@ -223,6 +369,9 @@ fn from_migration(settings: &Settings, owner: &Owner) -> Effective {
         toggle: support::hotkey_bindings(owner, Hotkey::Toggle),
         cycle_mode: support::hotkey_bindings(owner, Hotkey::CycleMode),
         yaw_mode: support::hotkey_bindings(owner, Hotkey::YawMode),
+        toggle_firing: CORE_FIRING,
+        cycle_mode_firing: CORE_FIRING,
+        yaw_mode_firing: CORE_FIRING,
     }
 }
 
@@ -241,8 +390,11 @@ fn import_config(path: &Path) -> legacy_config::Config {
     }
 }
 
+/// This process never runs the oracle's load(), so its v0.5.0 statics are where that build
+/// started them.
 fn from_import(c: &legacy_config::Config) -> Effective {
     from_legacy(
+        v050_startup(),
         c.world_space_yaw,
         c.yaw_mode_key,
         c.local_smoothing,
@@ -400,8 +552,8 @@ fn test_comparison_one_oracle_against_import(root: &Path, inputs: &[Input]) -> V
     for input in inputs {
         let o = read_oracle(root, input);
         let i = read_import(root, input);
-        for d in differences(&o, &i) {
-            failures.push(format!("{}: oracle/import {d}", input.name));
+        for (field, d) in differences(&o, &i) {
+            failures.push(format!("{}: oracle/import {field} {d}", input.name));
         }
     }
     failures
@@ -501,6 +653,7 @@ fn test_comparison_two_import_against_migration(
     defaults: &Path,
     builtin: bool,
     migrated: &mut BTreeSet<Vec<u8>>,
+    known: &mut BTreeSet<&'static str>,
 ) -> Vec<String> {
     let over = if builtin {
         "Defaults.ini at the built-in values"
@@ -533,15 +686,23 @@ fn test_comparison_two_import_against_migration(
                 format!("{n}: the folder holds CameraUnlock.ini and nothing else"),
             );
             if builtin {
-                for d in differences(&i, &g) {
-                    check(false, format!("{n}: import/created {d}"));
+                for (field, d) in differences(&i, &g) {
+                    if KNOWN_CHANGES.iter().any(|(k, _)| *k == field) {
+                        known.insert(field);
+                    } else {
+                        check(false, format!("{n}: import/created {field} {d}"));
+                    }
                 }
             }
             continue;
         };
 
-        for d in differences(&i, &g) {
-            check(false, format!("{n}: import/migration {d}"));
+        for (field, d) in differences(&i, &g) {
+            if KNOWN_CHANGES.iter().any(|(k, _)| *k == field) {
+                known.insert(field);
+            } else {
+                check(false, format!("{n}: import/migration {field} {d}"));
+            }
         }
         check(
             &stamp(&m.legacy) == legacy_before,
@@ -733,17 +894,20 @@ fn main() {
     std::fs::create_dir_all(root.join("user-builtin")).unwrap();
 
     let inputs = inputs();
-    let mut failures = test_the_committed_first_run_is_the_oracles(&root);
+    let mut failures = test_the_v050_hotkeys_are_its_source();
+    failures.extend(test_the_committed_first_run_is_the_oracles(&root));
     failures.extend(test_fresh_equals_upgrade(&root, &builtin_defaults));
     write_altered_defaults(&builtin_defaults, &altered_defaults);
     failures.extend(test_comparison_one_oracle_against_import(&root, &inputs));
     let mut migrated = BTreeSet::new();
+    let mut known = BTreeSet::new();
     failures.extend(test_comparison_two_import_against_migration(
         &root,
         &inputs,
         &builtin_defaults,
         true,
         &mut migrated,
+        &mut known,
     ));
     failures.extend(test_comparison_two_import_against_migration(
         &root,
@@ -751,7 +915,15 @@ fn main() {
         &altered_defaults,
         false,
         &mut migrated,
+        &mut known,
     ));
+    for (field, commit) in KNOWN_CHANGES {
+        if !known.contains(field) {
+            failures.push(format!(
+                "the known change to {field} ({commit}) no longer occurs"
+            ));
+        }
+    }
     write_migrated_files(&migrated);
 
     std::fs::remove_dir_all(&root).unwrap();
@@ -759,7 +931,7 @@ fn main() {
         println!("FAIL {f}");
     }
     println!(
-        "{} inputs, {} distinct migrated files; comparisons 1 and 2 find no difference: {}",
+        "{} inputs, {} distinct migrated files; comparison 1 finds no difference and comparison 2 only the known changes: {}",
         inputs.len(),
         migrated.len(),
         failures.is_empty()

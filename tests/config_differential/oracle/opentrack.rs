@@ -1,0 +1,691 @@
+//! OpenTrack UDP protocol handler
+//!
+//! Receives 3DOF head tracking data from OpenTrack via UDP on port 4242.
+//! The OpenTrack UDP protocol sends 48 bytes containing 6 IEEE 754
+//! little-endian doubles: x, y, z, yaw, pitch, roll.
+//! We only use yaw, pitch, roll for 3DOF tracking.
+//!
+//! # Protocol Details
+//!
+//! OpenTrack sends UDP datagrams at approximately 250Hz containing:
+//! - Bytes 0-7: X position (centimeters) as IEEE 754 little-endian double
+//! - Bytes 8-15: Y position (centimeters) as IEEE 754 little-endian double
+//! - Bytes 16-23: Z position (centimeters) as IEEE 754 little-endian double
+//! - Bytes 24-31: Yaw rotation (degrees) as IEEE 754 little-endian double
+//! - Bytes 32-39: Pitch rotation (degrees) as IEEE 754 little-endian double
+//! - Bytes 40-47: Roll rotation (degrees) as IEEE 754 little-endian double
+//!
+//! For 3DOF head tracking, we only use yaw, pitch, and roll (ignoring position).
+
+use std::io;
+use std::net::{SocketAddr, UdpSocket};
+use std::thread;
+use std::time::Duration;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::tracking::{
+    update_position_atomic, update_rotation_atomic, ATOMIC_SAMPLE_SEQ, GLOBAL_STATE,
+};
+
+/// OpenTrack UDP port (project-standard default).
+pub const OPENTRACK_PORT: u16 = 4242;
+
+/// OpenTrack packet size: 6 doubles * 8 bytes = 48 bytes
+pub const PACKET_SIZE: usize = 48;
+
+/// Sized for the largest datagram we accept: a 48-byte pose plus a Headcam
+/// trailer. Only the pose is read, but a short buffer would truncate the read.
+const RECEIVE_BUFFER_SIZE: usize = 64;
+
+/// True when the most recent packet came from off-box. Set from the
+/// datagram's sender address on every packet, so switching between a
+/// local OpenTrack instance and a phone on WiFi re-selects the smoothing
+/// parameter without a game restart. Starts `false`: before any packet
+/// arrives there is no connection to smooth.
+static IS_REMOTE_CONNECTION: AtomicBool = AtomicBool::new(false);
+
+/// Socket read timeout in milliseconds (4ms allows ~250Hz polling)
+const READ_TIMEOUT_MS: u64 = 4;
+
+/// Bind retry cadence when the port is held by another process. Mirrors
+/// `OpenTrackReceiver` in cameraunlock-core/csharp so users get the same
+/// "close the conflicting tracker, tracking comes back" experience.
+const BIND_RETRY_INTERVAL_MS: u64 = 500;
+const BIND_RETRY_LOG_INTERVAL_MS: u64 = 30000;
+
+/// Parsed OpenTrack data packet
+///
+/// Contains the full 6DOF tracking data from OpenTrack, though this mod
+/// only uses the rotation components (yaw, pitch, roll) for 3DOF tracking.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenTrackData {
+    /// X position in centimeters - IGNORED for 3DOF
+    pub x: f64,
+    /// Y position in centimeters - IGNORED for 3DOF
+    pub y: f64,
+    /// Z position in centimeters - IGNORED for 3DOF
+    pub z: f64,
+    /// Yaw rotation in degrees (horizontal head turn) - APPLIED
+    pub yaw: f64,
+    /// Pitch rotation in degrees (vertical head tilt) - APPLIED
+    pub pitch: f64,
+    /// Roll rotation in degrees (head tilt side-to-side) - APPLIED
+    pub roll: f64,
+}
+
+impl OpenTrackData {
+    /// Parse a 48-byte packet into OpenTrackData
+    ///
+    /// OpenTrack sends 6 IEEE 754 little-endian doubles in order:
+    /// x, y, z, yaw, pitch, roll
+    ///
+    /// # Arguments
+    /// * `data` - Exactly 48 bytes of UDP packet data
+    ///
+    /// # Returns
+    /// Parsed OpenTrackData with all 6 values extracted
+    pub fn from_bytes(data: &[u8; PACKET_SIZE]) -> Self {
+        Self {
+            x: f64::from_le_bytes(data[0..8].try_into().unwrap()),
+            y: f64::from_le_bytes(data[8..16].try_into().unwrap()),
+            z: f64::from_le_bytes(data[16..24].try_into().unwrap()),
+            yaw: f64::from_le_bytes(data[24..32].try_into().unwrap()),
+            pitch: f64::from_le_bytes(data[32..40].try_into().unwrap()),
+            roll: f64::from_le_bytes(data[40..48].try_into().unwrap()),
+        }
+    }
+
+    /// True only when every field is finite AS AN f32.
+    ///
+    /// The receiver binds `0.0.0.0`, so any host on the network (or a
+    /// glitching tracker) can deliver a datagram. A single non-finite value
+    /// would flow into the exponential smoother and pin its running value
+    /// at `NaN` permanently, so every later sample stays `NaN` until a
+    /// tracking toggle resets the pipeline. Non-finite tracking data is
+    /// never legitimate, so we drop the packet at the boundary rather than
+    /// let it poison state.
+    ///
+    /// Checking the f64 alone is not enough, and this is the band that gets
+    /// missed: a finite f64 can exceed the f32 range - 1e300 is an ordinary
+    /// double - and `engine_hook` narrows to f32 to write the engine's
+    /// `FVector`, where that value becomes an infinity written straight into
+    /// game memory with nothing left to catch it. Gating on the NARROWED value
+    /// closes the band. Matches `FiniteFloat` in the core's
+    /// `cpp/src/protocol/opentrack_packet.cpp`.
+    pub fn is_finite(&self) -> bool {
+        fn finite_as_f32(v: f64) -> bool {
+            (v as f32).is_finite()
+        }
+
+        finite_as_f32(self.x)
+            && finite_as_f32(self.y)
+            && finite_as_f32(self.z)
+            && finite_as_f32(self.yaw)
+            && finite_as_f32(self.pitch)
+            && finite_as_f32(self.roll)
+    }
+
+    /// Create a 48-byte packet from OpenTrackData
+    ///
+    /// Useful for testing - creates a packet in the OpenTrack format
+    /// that can be sent via UDP.
+    ///
+    /// # Returns
+    /// 48-byte array containing the packet data
+    #[cfg(test)]
+    pub fn to_bytes(&self) -> [u8; PACKET_SIZE] {
+        let mut buf = [0u8; PACKET_SIZE];
+        buf[0..8].copy_from_slice(&self.x.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.y.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.z.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.yaw.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.pitch.to_le_bytes());
+        buf[40..48].copy_from_slice(&self.roll.to_le_bytes());
+        buf
+    }
+}
+
+static NON_FINITE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Decode one datagram into a pose. `None` discards the datagram whole.
+///
+/// Only the first 48 bytes are read: a Headcam datagram carries a trailer
+/// past the pose, and this mod has nothing to do with it.
+pub(crate) fn decode_datagram(datagram: &[u8]) -> Option<OpenTrackData> {
+    let packet: &[u8; PACKET_SIZE] = datagram[..PACKET_SIZE].try_into().unwrap();
+    let data = OpenTrackData::from_bytes(packet);
+
+    // Drop non-finite packets at the boundary: a single NaN/Inf would pin
+    // the smoother at NaN for the rest of the session.
+    if !data.is_finite() {
+        // A tracker stuck emitting NaN sends these at full packet rate, so the
+        // warning is latched: one line, not 250 a second.
+        if !NON_FINITE_LOGGED.swap(true, Ordering::Relaxed) {
+            log::warn!("Discarding OpenTrack packet with non-finite values (logged once)");
+        }
+        return None;
+    }
+
+    Some(data)
+}
+
+/// True when tracking data is arriving from a remote network device
+/// rather than from this machine. Mirrors
+/// `OpenTrackReceiver.IsRemoteConnection` in the C# core; drives the
+/// LocalSmoothing / RemoteSmoothing selection.
+pub fn is_remote_connection() -> bool {
+    IS_REMOTE_CONNECTION.load(Ordering::Acquire)
+}
+
+/// A sender is local when it is loopback (`127.0.0.1`, `::1`), and
+/// remote otherwise. Same rule as `!IPAddress.IsLoopback(senderAddress)`
+/// in the C# core.
+fn is_remote_address(addr: &SocketAddr) -> bool {
+    !addr.ip().is_loopback()
+}
+
+/// Spawn the OpenTrack UDP receiver thread.
+///
+/// The thread first tries to bind `0.0.0.0:4242`. If another process is
+/// holding the port, it retries every 5s (logging every 30s) until either
+/// the bind succeeds or shutdown is requested. The rest of the mod
+/// (engine hook, hotkey poller, D3D overlay) keeps running through the
+/// retry, so closing the conflicting tracker brings head tracking back
+/// to life with no game restart. Binding to all interfaces lets
+/// phone-based trackers send directly without an OpenTrack relay on the
+/// PC.
+pub fn start_receiver() {
+    thread::spawn(|| {
+        let Some(socket) = bind_with_retry() else {
+            return;
+        };
+        if let Err(e) = socket.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS))) {
+            log::error!("Failed to set OpenTrack socket read timeout: {}", e);
+            return;
+        }
+        receive_loop(socket);
+    });
+}
+
+fn bind_with_retry() -> Option<UdpSocket> {
+    let addr = format!("0.0.0.0:{}", OPENTRACK_PORT);
+
+    match UdpSocket::bind(&addr) {
+        Ok(socket) => {
+            log::info!("OpenTrack receiver started on port {}", OPENTRACK_PORT);
+            return Some(socket);
+        }
+        Err(e) => {
+            log::error!(
+                "Failed to bind UDP port {} ({}) -- will retry every {}ms",
+                OPENTRACK_PORT,
+                e,
+                BIND_RETRY_INTERVAL_MS
+            );
+        }
+    }
+
+    let attempts_per_log = BIND_RETRY_LOG_INTERVAL_MS / BIND_RETRY_INTERVAL_MS;
+    let mut attempts: u64 = 0;
+    loop {
+        // Sleep in 100ms slices so shutdown_requested is honoured promptly.
+        for _ in 0..(BIND_RETRY_INTERVAL_MS / 100) {
+            if GLOBAL_STATE.read().shutdown_requested {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        attempts += 1;
+        match UdpSocket::bind(&addr) {
+            Ok(socket) => {
+                log::info!(
+                    "Bound UDP port {} after {} retries",
+                    OPENTRACK_PORT,
+                    attempts
+                );
+                return Some(socket);
+            }
+            Err(_) => {
+                if attempts.is_multiple_of(attempts_per_log) {
+                    log::warn!(
+                        "Still waiting for UDP port {} ({}s elapsed)",
+                        OPENTRACK_PORT,
+                        attempts * BIND_RETRY_INTERVAL_MS / 1000
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn receive_loop(socket: UdpSocket) {
+    let mut buf = [0u8; RECEIVE_BUFFER_SIZE];
+    // All three of these fire per datagram or per failed recv, so each is
+    // reported once rather than at packet rate.
+    let mut first_packet_logged = false;
+    let mut bad_size_logged = false;
+    let mut last_logged_error_kind: Option<io::ErrorKind> = None;
+
+    loop {
+        if GLOBAL_STATE.read().shutdown_requested {
+            log::info!("OpenTrack receiver shutting down");
+            break;
+        }
+
+        match socket.recv_from(&mut buf) {
+            Ok((size, sender)) if size >= PACKET_SIZE => {
+                IS_REMOTE_CONNECTION.store(is_remote_address(&sender), Ordering::Release);
+
+                let Some(data) = decode_datagram(&buf[..size]) else {
+                    continue;
+                };
+
+                // Update rotation + position using lock-free atomics
+                // (optimized hot path).
+                update_rotation_atomic(data.yaw, data.pitch, data.roll);
+                update_position_atomic(data.x, data.y, data.z);
+                // Bump the sequence counter AFTER the value writes.
+                // Release ordering pairs with the Acquire load on the
+                // render thread so the new yaw/pitch/roll are
+                // guaranteed visible to the smoothing pipeline once it
+                // observes the new sequence number.
+                ATOMIC_SAMPLE_SEQ.fetch_add(1, Ordering::Release);
+
+                // The one line that proves tracker data reached the mod, which is
+                // the first thing to establish when a user reports no head tracking.
+                if !first_packet_logged {
+                    first_packet_logged = true;
+                    log::info!(
+                        "First tracker packet from {}: yaw={:.2} pitch={:.2} roll={:.2}",
+                        sender,
+                        data.yaw,
+                        data.pitch,
+                        data.roll
+                    );
+                }
+
+                // Also update GLOBAL_STATE for legacy compatibility
+                // This is less frequent than reads, so RwLock overhead is acceptable
+                {
+                    let mut state = GLOBAL_STATE.write();
+                    state.yaw = data.yaw;
+                    state.pitch = data.pitch;
+                    state.roll = data.roll;
+                }
+            }
+            Ok((size, _)) => {
+                if !bad_size_logged {
+                    bad_size_logged = true;
+                    log::warn!(
+                        "Received packet with unexpected size: {} bytes (logged once)",
+                        size
+                    );
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Timeout, no data available - this is normal
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
+                // Timeout, no data available - this is normal
+            }
+            Err(e) => {
+                // A sticky error (classically WSAECONNRESET) returns immediately with
+                // no sleep, so logging every occurrence would fill the log at CPU
+                // speed. Report each distinct error kind once, as the C# core does.
+                if last_logged_error_kind != Some(e.kind()) {
+                    last_logged_error_kind = Some(e.kind());
+                    log::error!("UDP receive error: {}", e);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::UdpSocket;
+    use std::time::Duration;
+
+    #[test]
+    fn loopback_sender_is_local() {
+        assert!(!is_remote_address(&"127.0.0.1:4242".parse().unwrap()));
+        assert!(!is_remote_address(&"[::1]:4242".parse().unwrap()));
+    }
+
+    #[test]
+    fn lan_sender_is_remote() {
+        assert!(is_remote_address(&"192.168.1.50:4242".parse().unwrap()));
+    }
+
+    /// Helper to compare f64 values with tolerance
+    fn approx_eq(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-10
+    }
+
+    #[test]
+    fn test_parse_zeros() {
+        let buf = [0u8; PACKET_SIZE];
+        let data = OpenTrackData::from_bytes(&buf);
+        assert_eq!(data.x, 0.0);
+        assert_eq!(data.y, 0.0);
+        assert_eq!(data.z, 0.0);
+        assert_eq!(data.yaw, 0.0);
+        assert_eq!(data.pitch, 0.0);
+        assert_eq!(data.roll, 0.0);
+    }
+
+    #[test]
+    fn test_parse_known_values() {
+        // 45.0 as f64 little-endian bytes
+        let forty_five_bytes: [u8; 8] = 45.0_f64.to_le_bytes();
+
+        let mut buf = [0u8; PACKET_SIZE];
+        // Put 45.0 in yaw position (bytes 24-32)
+        buf[24..32].copy_from_slice(&forty_five_bytes);
+
+        let data = OpenTrackData::from_bytes(&buf);
+        assert!(approx_eq(data.yaw, 45.0));
+    }
+
+    #[test]
+    fn test_parse_endianness_negative_values() {
+        // Test with negative values to verify little-endian byte order
+        let test_data = OpenTrackData {
+            x: -10.5,
+            y: -20.25,
+            z: -30.125,
+            yaw: -45.0,
+            pitch: -15.5,
+            roll: -7.25,
+        };
+
+        let bytes = test_data.to_bytes();
+        let parsed = OpenTrackData::from_bytes(&bytes);
+
+        assert!(approx_eq(parsed.x, test_data.x), "X mismatch");
+        assert!(approx_eq(parsed.y, test_data.y), "Y mismatch");
+        assert!(approx_eq(parsed.z, test_data.z), "Z mismatch");
+        assert!(approx_eq(parsed.yaw, test_data.yaw), "Yaw mismatch");
+        assert!(approx_eq(parsed.pitch, test_data.pitch), "Pitch mismatch");
+        assert!(approx_eq(parsed.roll, test_data.roll), "Roll mismatch");
+    }
+
+    #[test]
+    fn test_parse_all_fields() {
+        // Test all fields with distinct values
+        let test_data = OpenTrackData {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            yaw: 45.0,
+            pitch: 30.0,
+            roll: 15.0,
+        };
+
+        let bytes = test_data.to_bytes();
+        let parsed = OpenTrackData::from_bytes(&bytes);
+
+        assert!(approx_eq(parsed.x, 1.0));
+        assert!(approx_eq(parsed.y, 2.0));
+        assert!(approx_eq(parsed.z, 3.0));
+        assert!(approx_eq(parsed.yaw, 45.0));
+        assert!(approx_eq(parsed.pitch, 30.0));
+        assert!(approx_eq(parsed.roll, 15.0));
+    }
+
+    #[test]
+    fn test_parse_extreme_values() {
+        // Test with extreme but valid rotation values
+        let test_data = OpenTrackData {
+            x: 1000.0,
+            y: -1000.0,
+            z: 500.0,
+            yaw: 180.0,   // Full turn
+            pitch: 90.0,  // Looking straight up
+            roll: -180.0, // Upside down
+        };
+
+        let bytes = test_data.to_bytes();
+        let parsed = OpenTrackData::from_bytes(&bytes);
+
+        assert!(approx_eq(parsed.yaw, 180.0));
+        assert!(approx_eq(parsed.pitch, 90.0));
+        assert!(approx_eq(parsed.roll, -180.0));
+    }
+
+    #[test]
+    fn test_parse_fractional_degrees() {
+        // Test precise fractional values
+        let test_data = OpenTrackData {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 12.3456789,
+            pitch: -0.123456,
+            roll: 0.000001,
+        };
+
+        let bytes = test_data.to_bytes();
+        let parsed = OpenTrackData::from_bytes(&bytes);
+
+        assert!(approx_eq(parsed.yaw, 12.3456789));
+        assert!(approx_eq(parsed.pitch, -0.123456));
+        assert!(approx_eq(parsed.roll, 0.000001));
+    }
+
+    #[test]
+    fn test_round_trip() {
+        // Verify to_bytes/from_bytes round trip
+        let original = OpenTrackData {
+            x: 123.456,
+            y: -789.012,
+            z: 345.678,
+            yaw: 67.89,
+            pitch: -12.34,
+            roll: 5.678,
+        };
+
+        let bytes = original.to_bytes();
+        let parsed = OpenTrackData::from_bytes(&bytes);
+
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn test_is_finite_accepts_normal_data() {
+        let data = OpenTrackData {
+            x: 1.0,
+            y: -2.0,
+            z: 3.0,
+            yaw: 45.0,
+            pitch: -30.0,
+            roll: 15.0,
+        };
+        assert!(data.is_finite());
+    }
+
+    #[test]
+    fn is_finite_rejects_a_finite_double_that_overflows_f32() {
+        // The band a plain f64 check misses. 1e300 is an ordinary double and
+        // `f64::is_finite` says yes, but `engine_hook` narrows to f32 to write
+        // the engine's FVector and the value becomes an infinity in game memory
+        // with nothing downstream to catch it. The socket binds 0.0.0.0, so any
+        // host on the network can send this.
+        let base = OpenTrackData {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+        };
+        for field in 0..6 {
+            let mut d = base;
+            match field {
+                0 => d.x = 1e300,
+                1 => d.y = 1e300,
+                2 => d.z = 1e300,
+                3 => d.yaw = 1e300,
+                4 => d.pitch = 1e300,
+                _ => d.roll = 1e300,
+            }
+            assert!(
+                d.x.is_finite()
+                    && d.y.is_finite()
+                    && d.z.is_finite()
+                    && d.yaw.is_finite()
+                    && d.pitch.is_finite()
+                    && d.roll.is_finite(),
+                "1e300 is a finite f64 - that is the whole point of the test"
+            );
+            assert!(
+                !d.is_finite(),
+                "field {field} at 1e300 passed validation and becomes f32::INFINITY downstream"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_finite_rejects_nan_and_inf() {
+        // Each non-finite field, one at a time, must fail validation so a
+        // single bad packet can never reach the smoother.
+        let bad_values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        for &bad in &bad_values {
+            let base = OpenTrackData {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                yaw: 0.0,
+                pitch: 0.0,
+                roll: 0.0,
+            };
+            for field in 0..6 {
+                let mut d = base;
+                match field {
+                    0 => d.x = bad,
+                    1 => d.y = bad,
+                    2 => d.z = bad,
+                    3 => d.yaw = bad,
+                    4 => d.pitch = bad,
+                    _ => d.roll = bad,
+                }
+                assert!(
+                    !d.is_finite(),
+                    "field {} = {:?} should be rejected",
+                    field,
+                    bad
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_finite_on_parsed_nan_packet() {
+        // A NaN that arrives over the wire must be caught after parsing.
+        let mut buf = [0u8; PACKET_SIZE];
+        buf[24..32].copy_from_slice(&f64::NAN.to_le_bytes()); // yaw
+        let data = OpenTrackData::from_bytes(&buf);
+        assert!(!data.is_finite());
+    }
+
+    #[test]
+    fn test_packet_size_constant() {
+        // Verify PACKET_SIZE matches 6 * 8 bytes
+        assert_eq!(PACKET_SIZE, 48);
+        assert_eq!(PACKET_SIZE, 6 * std::mem::size_of::<f64>());
+    }
+
+    #[test]
+    fn test_port_constant() {
+        assert_eq!(OPENTRACK_PORT, 4242);
+    }
+
+    /// Integration test: verify UDP receiver can receive and parse packets
+    ///
+    /// This test starts the receiver on an alternate port (to avoid conflicts),
+    /// sends a test packet, and verifies the receiver correctly processes it.
+    #[test]
+    fn test_udp_packet_parsing_integration() {
+        // Use a different port to avoid conflicts with actual OpenTrack
+        let test_port = 14242;
+
+        // Create sender and receiver sockets
+        let receiver = UdpSocket::bind(format!("127.0.0.1:{}", test_port)).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+        // Create test data
+        let test_data = OpenTrackData {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 42.5,
+            pitch: -15.0,
+            roll: 7.25,
+        };
+
+        // Send packet
+        let bytes = test_data.to_bytes();
+        sender
+            .send_to(&bytes, format!("127.0.0.1:{}", test_port))
+            .unwrap();
+
+        // Receive and verify
+        let mut buf = [0u8; PACKET_SIZE];
+        let (len, _) = receiver.recv_from(&mut buf).unwrap();
+
+        assert_eq!(len, PACKET_SIZE);
+
+        let received = OpenTrackData::from_bytes(&buf);
+        assert!(approx_eq(received.yaw, 42.5));
+        assert!(approx_eq(received.pitch, -15.0));
+        assert!(approx_eq(received.roll, 7.25));
+    }
+
+    /// Build a datagram with the given pose and, optionally, a Headcam
+    /// trailer past it.
+    fn datagram(data: &OpenTrackData, trailer: bool) -> Vec<u8> {
+        let mut packet = data.to_bytes().to_vec();
+        if trailer {
+            packet.extend_from_slice(b"HCAM");
+            packet.push(1);
+            packet.push(7);
+        }
+        packet
+    }
+
+    fn level_pose() -> OpenTrackData {
+        OpenTrackData {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_trailered_datagram_decodes_its_pose() {
+        let mut pose = level_pose();
+        pose.yaw = 12.5;
+
+        let data = decode_datagram(&datagram(&pose, true)).expect("trailered pose decodes");
+
+        assert!(approx_eq(data.yaw, 12.5));
+    }
+
+    #[test]
+    fn a_non_finite_pose_is_dropped() {
+        let mut nan_pose = level_pose();
+        nan_pose.yaw = f64::NAN;
+
+        assert!(decode_datagram(&datagram(&nan_pose, true)).is_none());
+    }
+}
