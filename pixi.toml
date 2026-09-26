@@ -33,8 +33,12 @@ render-config = { cmd = "cargo test --target i686-pc-windows-msvc --features tes
 # is only the executor that drives our pipeline through them, and it answers
 # `skip <reason>` for the units this port does not have rather than reporting a
 # pass for a test that never ran. Where a local test and a vector disagree, the
-# vector is right.
-test-vectors = { cmd = "node cameraunlock-core/scripts/pipeline-vectors/run-vectors.mjs --vectors cameraunlock-core/data/pipeline-conformance.json --harness target/i686-pc-windows-msvc/debug/conformance_harness.exe", depends-on = ["build-harness"] }
+# vector is right. --expect-skips names every vector it skips: the position
+# processor and session position vectors (this port's position is centimetres
+# with its own limits and no sensitivity, inversion or pivot stage), the Euler
+# round trips (it has no compose/decompose), the deadzone (it has none) and the
+# centimetres-to-metres vector (it has no such conversion).
+test-vectors = { cmd = "node cameraunlock-core/scripts/pipeline-vectors/run-vectors.mjs --vectors cameraunlock-core/data/pipeline-conformance.json --harness target/i686-pc-windows-msvc/debug/conformance_harness.exe --expect-skips position-clamp-before-smoothing,position-clamp-is-asymmetric,vertical-limits-are-independent,pivot-compensation-cancels-a-pure-head-turn,pivot-compensation-defaults-off,pivot-compensation-covers-pitch-and-the-up-arm,no-center-captured-on-connect-position,gimbal-lock-at-exactly-90,euler-roundtrip-sweep,euler-decomposition-returns-canonical-angles,deadzone-is-continuous-at-its-edge,wire-position-is-centimetres", depends-on = ["build-harness"] }
 build-harness = "cargo build --target i686-pc-windows-msvc --bin conformance_harness"
 lint = "cargo clippy --target i686-pc-windows-msvc -- -D warnings"
 fmt = "cargo fmt --check"
@@ -44,9 +48,7 @@ bench-quick = "cargo bench -- --quick"
 install = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Configuration Debug", depends-on = ["build"] }
 install-release = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Configuration Release", depends-on = ["build-release"] }
 validate-release = "powershell -ExecutionPolicy Bypass -File scripts/validate-release.ps1"
-# Depends on the config tests rather than on test: test-vectors fails against the pinned
-# core's vectors (the packet unit's columns and the HCAM trailer), which is separate work.
-package = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/package.ps1", depends-on = ["build-release", "test-config-lint"] }
+package = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/package.ps1", depends-on = ["build-release", "test"] }
 # Validates this repo's newest release ZIP against the launcher manifest rules.
 validate-manifest = "node cameraunlock-core/scripts/validate-manifest.mjs"
 release = "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"

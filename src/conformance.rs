@@ -76,12 +76,8 @@ impl Harness {
 
     /// `begin`: decide whether this vector can run at all, and say why not.
     fn configure(&mut self, unit_name: &str, vector_id: &str, cfg: &[(String, f64)]) {
-        // Vectors this port has no mechanism for, named individually because the
+        // A vector this port has no mechanism for, named individually because the
         // unit itself is otherwise supported.
-        if vector_id == "hcam-trailer-parses" {
-            self.skip("the port reads only the first 48 bytes of a datagram and never inspects the HCAM trailer, so it has no trailer_present to report; hcam-trailer-does-not-recenter covers the behaviour that matters");
-            return;
-        }
         if vector_id == "wire-position-is-centimetres" {
             self.skip("position is carried in centimetres end to end (POS_LIMIT_*_CM), so there is no cm-to-metres conversion in this port to check");
             return;
@@ -204,15 +200,31 @@ impl Harness {
     fn packet(&mut self, hex: &str) {
         let bytes = from_hex(hex);
 
-        // Position is reported in the port's own unit, centimetres. The vector
-        // that asks for metres is skipped above rather than converted here,
-        // because a conversion applied by the harness would prove nothing about
-        // the port. trailer_present and recenter_counter are always zero: this
-        // port never looks past byte 47, which is why hcam-trailer-parses is
-        // skipped too.
+        // The port keeps position in centimetres, the wire's unit, and the
+        // runner's position columns are metres, so they are written divided by
+        // 100. That division is the harness's, which is why
+        // wire-position-is-centimetres is skipped above rather than passed by it.
+        // The port accepts or drops a datagram whole, so ok_rotation and
+        // ok_position are both ok.
+        let (trailer_present, counter) = match crate::opentrack::hcam_trailer(&bytes) {
+            Some(counter) => (1.0, f64::from(counter)),
+            None => (0.0, 0.0),
+        };
         let row = match crate::opentrack::decode_datagram(&bytes) {
-            Some(d) => [1.0, d.yaw, d.pitch, d.roll, d.x, d.y, d.z, 0.0, 0.0],
-            None => [0.0; 9],
+            Some(d) => [
+                1.0,
+                d.yaw,
+                d.pitch,
+                d.roll,
+                d.x / 100.0,
+                d.y / 100.0,
+                d.z / 100.0,
+                trailer_present,
+                counter,
+                1.0,
+                1.0,
+            ],
+            None => [0.0; 11],
         };
         self.emit(&row);
     }

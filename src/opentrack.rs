@@ -145,12 +145,13 @@ impl OpenTrackData {
 
 static NON_FINITE_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// Decode one datagram into a pose. `None` discards the datagram whole.
+/// Decode one datagram into a pose. `None` discards the datagram whole: one
+/// shorter than the pose, or one with a value that is not finite.
 ///
 /// Only the first 48 bytes are read: a Headcam datagram carries a trailer
-/// past the pose, and this mod has nothing to do with it.
+/// past the pose, which [`hcam_trailer`] reads.
 pub(crate) fn decode_datagram(datagram: &[u8]) -> Option<OpenTrackData> {
-    let packet: &[u8; PACKET_SIZE] = datagram[..PACKET_SIZE].try_into().unwrap();
+    let packet: &[u8; PACKET_SIZE] = datagram.get(..PACKET_SIZE)?.try_into().unwrap();
     let data = OpenTrackData::from_bytes(packet);
 
     // Drop non-finite packets at the boundary: a single NaN/Inf would pin
@@ -165,6 +166,19 @@ pub(crate) fn decode_datagram(datagram: &[u8]) -> Option<OpenTrackData> {
     }
 
     Some(data)
+}
+
+/// The counter of a Headcam CENTER trailer: bytes 48-51 `HCAM`, byte 52 a
+/// version of 1 or later, byte 53 the counter. `None` for any other datagram,
+/// plain OpenTrack's 56-byte frame counter included.
+///
+/// The tracker centres its own output before it sends the trailer, so the mod
+/// only notes it: centring here as well would centre twice.
+pub(crate) fn hcam_trailer(datagram: &[u8]) -> Option<u8> {
+    match datagram.get(PACKET_SIZE..PACKET_SIZE + 6)? {
+        [b'H', b'C', b'A', b'M', version, counter] if *version >= 1 => Some(*counter),
+        _ => None,
+    }
 }
 
 /// True when tracking data is arriving from a remote network device
@@ -259,6 +273,7 @@ fn receive_loop(socket: UdpSocket) {
     // reported once rather than at packet rate.
     let mut first_packet_logged = false;
     let mut bad_size_logged = false;
+    let mut last_hcam_counter: Option<u8> = None;
     let mut last_logged_error_kind: Option<io::ErrorKind> = None;
 
     loop {
@@ -274,6 +289,16 @@ fn receive_loop(socket: UdpSocket) {
                 let Some(data) = decode_datagram(&buf[..size]) else {
                     continue;
                 };
+
+                // A CENTER press arrives as a burst of datagrams with one counter.
+                if let Some(counter) = hcam_trailer(&buf[..size]) {
+                    if last_hcam_counter != Some(counter) {
+                        last_hcam_counter = Some(counter);
+                        log::info!(
+                            "Tracker CENTER signal (counter {counter}): the tracker centres its own output"
+                        );
+                    }
+                }
 
                 // Update rotation + position using lock-free atomics
                 // (optimized hot path).
@@ -667,6 +692,30 @@ mod tests {
         let data = decode_datagram(&datagram(&pose, true)).expect("trailered pose decodes");
 
         assert!(approx_eq(data.yaw, 12.5));
+    }
+
+    #[test]
+    fn a_datagram_shorter_than_the_pose_is_dropped() {
+        let full = datagram(&level_pose(), false);
+        assert!(decode_datagram(&full[..PACKET_SIZE - 1]).is_none());
+        assert!(decode_datagram(&full).is_some());
+    }
+
+    #[test]
+    fn only_a_headcam_trailer_gives_a_counter() {
+        let pose = level_pose();
+        assert_eq!(hcam_trailer(&datagram(&pose, true)), Some(7));
+        assert_eq!(hcam_trailer(&datagram(&pose, false)), None);
+        let mut frame_counter = datagram(&pose, false);
+        frame_counter.extend_from_slice(&[0, 0, 0, 0, 0x80, 0x1c, 0xc8, 0x40]);
+        assert_eq!(hcam_trailer(&frame_counter), None);
+        let mut version_zero = datagram(&pose, true);
+        version_zero[52] = 0;
+        assert_eq!(hcam_trailer(&version_zero), None);
+        let mut version_two = datagram(&pose, true);
+        version_two[52] = 2;
+        assert_eq!(hcam_trailer(&version_two), Some(7));
+        assert_eq!(hcam_trailer(&datagram(&pose, true)[..53]), None);
     }
 
     #[test]
