@@ -185,7 +185,7 @@ policy, so both ZIP variants redistribute that code.
 This is our own code, under a different copyright holder to the mod's own
 `LICENSE`, which is why it needs a notice of its own.
 
-- Pinned commit: `883ff59a4cbcd072f7ae18e35af26e5d38c70c5f`
+- Pinned commit: `b4df73a5d8076968fcbf7e4088dd49db11a2684e`
 - **Upstream**: https://github.com/itsloopyo/cameraunlock-core
 
 ```
