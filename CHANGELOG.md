@@ -1,40 +1,21 @@
 # Changelog
 
-## [0.5.0] - 2026-09-17
-
-### Added
-
-- standardise the log file, name every discovery failure, gate license notices
-- hook the render scene node and move the game's own reticle
-
-### Fixed
-
-- treat a repeated datagram as a repeat, not a new sample
-- re-sync THIRD-PARTY-NOTICES before cutting a release
-- mirror the vertical limit and restore the MIT grant
-- retry the tracker port every 500ms instead of every 5s
-- preserve originals across shim upgrades and uninstall failures
-- settle and confirm the window centering instead of moving once
-- suspend head tracking in the pause menu
-
-## [0.4.0] - 2026-08-20
-
-### Added
-
-- select smoothing per connection instead of a baseline floor
-- drop mod-side recentring, latch the noisy receive-loop logs
-
-### Fixed
-
-- honour the 5s HCAM re-arm window and publish a press with its pose
-- expire the extrapolation instead of holding the overshoot
-- clamp position into the limits before smoothing, not only after
-- keep the heading when the view pitch reaches vertical
-- assume a 30Hz tracker, not 60Hz, until the real rate is measured
-- take the shortest arc for yaw and roll across the 180 seam
-- pass required ShimMarker to Invoke-DevDeployShim
-
 ## [Unreleased]
+
+### Changed
+
+- Settings move to `Build\Final\CameraUnlock.ini`. Earlier versions of the mod kept these settings in `bioshock_headtrack.ini`, in the same folder. The first time this version starts and finds no `CameraUnlock.ini`, it reads your settings from `bioshock_headtrack.ini` and writes them into `CameraUnlock.ini`. It never changes `bioshock_headtrack.ini`, and does not read it again while `CameraUnlock.ini` exists.
+- A setting that the defaults the README shows set to `default` is written as `default` when the value imported for it equals its default at that start, which is the value `Defaults.ini` gives it, or the built-in value where `Defaults.ini` gives none. It then follows `Defaults.ini`. Every other setting is written with the value imported for it.
+- `RotationEnabled` and `PositionEnabled` are one setting here, the tracking mode, so both are written as `default` or neither is.
+- Comments, and keys the mod never read, are not carried over. Nor are these, where your old file had them:
+  - A sensitivity, scale, deadzone, response curve or axis inversion you changed from its default. Set these in your tracker instead.
+  - Reticle settings, and a key that toggled the reticle.
+  - The setting for a feature that earlier versions shipped switched off while it was untested. It now follows the mod's default.
+- An older version of the mod reads `bioshock_headtrack.ini` and never reads `CameraUnlock.ini`, so a setting you change after updating is not in `bioshock_headtrack.ini`.
+- Deleting only `CameraUnlock.ini` makes the next start read `bioshock_headtrack.ini` again. To go back to the defaults, replace everything in `CameraUnlock.ini` with the defaults the README shows. Every setting they set to `default` then follows `Defaults.ini`.
+- Hotkeys are written as key names, and each hotkey lists every key that triggers it, the Ctrl+Shift chord included: `ToggleKey=End, Ctrl+Shift+Y`. A `YawModeKey` code from `bioshock_headtrack.ini` is carried as its key name with `Ctrl+Shift+H` beside it, since that chord always fired it too: `YawModeKey=0x70` becomes `YawModeKey=F1, Ctrl+Shift+H`.
+- A hotkey bound to a plain key no longer fires while Ctrl and Shift are both held, so Ctrl+Shift with that key reaches only a binding that names the chord.
+- Holding `End` or `Page Up` no longer repeats its action every 0.3 seconds: each press acts once.
 
 ### Added
 
@@ -44,14 +25,12 @@
 - The tracking mode (`Page Up` / `Ctrl+Shift+G`) and the yaw mode (`Page Down` / `Ctrl+Shift+H`) are saved to `CameraUnlock.ini` when you change them, as `RotationEnabled` and `PositionEnabled`, and `WorldSpaceYaw`, and the next start begins in them. Earlier versions started in rotation and position every time and never saved the yaw mode.
 - New settings: `UdpPort` (the port the mod listens on, 4242 by default), `EnableOnStartup` (whether tracking is on when the game starts, true by default), and `ToggleKey` and `CycleTrackingModeKey`, which were fixed keys before. `YawModeKey` now holds its chord too.
 
-- The shared pipeline conformance vectors from `cameraunlock-core` now run as
-  part of `pixi run test`. The vectors, the constants and the assertions all live
-  in the core; this repo supplies only the executor that drives its pipeline
-  through them, and it says out loud which vectors it cannot run rather than
-  reporting a pass for a test that never happened.
-- A `First tracker packet from ...` line in the log. Nothing previously recorded
-  that tracker data had arrived, so a log from a misconfigured tracker looked
-  identical to a healthy one.
+## [0.5.0] - 2026-09-17
+
+### Added
+
+- standardise the log file, name every discovery failure, gate license notices
+- hook the render scene node and move the game's own reticle
 
 ### Fixed
 
@@ -70,29 +49,23 @@
   hook narrowed it to write the game's `FVector`. The socket binds `0.0.0.0`, so
   any host on the network could send one. Validation now gates on the narrowed
   value.
-- The mod no longer aborts the game when it cannot create its log file. Under
-  `panic = "abort"` the old `.expect` took the whole process down over a
-  diagnostic file; it now continues without logging.
-- Three receive-loop warnings (non-finite packet, unexpected packet size, UDP
-  receive error) were logged per datagram with no latch. A tracker emitting NaN
-  produced ~250 lines a second, and a sticky socket error spun the loop with no
-  sleep and logged at CPU speed. Each is now reported once, with the socket
-  error deduplicated by error kind.
+- re-sync THIRD-PARTY-NOTICES before cutting a release
+- mirror the vertical limit and restore the MIT grant
+- retry the tracker port every 500ms instead of every 5s
+- preserve originals across shim upgrades and uninstall failures
+- settle and confirm the window centering instead of moving once
+- suspend head tracking in the pause menu
+
+## [0.4.0] - 2026-08-20
+
+### Added
+
+- A `First tracker packet from ...` line in the log. Nothing previously recorded
+  that tracker data had arrived, so a log from a misconfigured tracker looked
+  identical to a healthy one.
 
 ### Changed
 
-- Settings move to `Build\Final\CameraUnlock.ini`. Earlier versions of the mod kept these settings in `bioshock_headtrack.ini`, in the same folder. The first time this version starts and finds no `CameraUnlock.ini`, it reads your settings from `bioshock_headtrack.ini` and writes them into `CameraUnlock.ini`. It never changes `bioshock_headtrack.ini`, and does not read it again while `CameraUnlock.ini` exists.
-- A setting that the defaults the README shows set to `default` is written as `default` when the value imported for it equals its default at that start, which is the value `Defaults.ini` gives it, or the built-in value where `Defaults.ini` gives none. It then follows `Defaults.ini`. Every other setting is written with the value imported for it.
-- `RotationEnabled` and `PositionEnabled` are one setting here, the tracking mode, so both are written as `default` or neither is.
-- Comments, and keys the mod never read, are not carried over. Nor are these, where your old file had them:
-  - A sensitivity, scale, deadzone, response curve or axis inversion you changed from its default. Set these in your tracker instead.
-  - Reticle settings, and a key that toggled the reticle.
-  - The setting for a feature that earlier versions shipped switched off while it was untested. It now follows the mod's default.
-- An older version of the mod reads `bioshock_headtrack.ini` and never reads `CameraUnlock.ini`, so a setting you change after updating is not in `bioshock_headtrack.ini`.
-- Deleting only `CameraUnlock.ini` makes the next start read `bioshock_headtrack.ini` again. To go back to the defaults, replace everything in `CameraUnlock.ini` with the defaults the README shows. Every setting they set to `default` then follows `Defaults.ini`.
-- Hotkeys are written as key names, and each hotkey lists every key that triggers it, the Ctrl+Shift chord included: `ToggleKey=End, Ctrl+Shift+Y`. A `YawModeKey` code from `bioshock_headtrack.ini` is carried as its key name with `Ctrl+Shift+H` beside it, since that chord always fired it too: `YawModeKey=0x70` becomes `YawModeKey=F1, Ctrl+Shift+H`.
-- A hotkey bound to a plain key no longer fires while Ctrl and Shift are both held, so Ctrl+Shift with that key reaches only a binding that names the chord.
-- Holding `End` or `Page Up` no longer repeats its action every 0.3 seconds: each press acts once.
 - Removed recentring from the mod. The `Home` / `Ctrl+Shift+T` hotkey is
   gone, and the mod no longer acts on the CENTER signal a tracker app
   sends in its packets. Centre the view in your tracker app instead. A
@@ -111,6 +84,24 @@
   The smoothing value is re-selected per frame, so switching between a
   local OpenTrack instance and a phone on WiFi takes effect without a
   game restart.
+
+### Fixed
+
+- The mod no longer aborts the game when it cannot create its log file. Under
+  `panic = "abort"` the old `.expect` took the whole process down over a
+  diagnostic file; it now continues without logging.
+- Three receive-loop warnings (non-finite packet, unexpected packet size, UDP
+  receive error) were logged per datagram with no latch. A tracker emitting NaN
+  produced ~250 lines a second, and a sticky socket error spun the loop with no
+  sleep and logged at CPU speed. Each is now reported once, with the socket
+  error deduplicated by error kind.
+- honour the 5s HCAM re-arm window and publish a press with its pose
+- expire the extrapolation instead of holding the overshoot
+- clamp position into the limits before smoothing, not only after
+- keep the heading when the view pitch reaches vertical
+- assume a 30Hz tracker, not 60Hz, until the real rate is measured
+- take the shortest arc for yaw and roll across the 180 seam
+- pass required ShimMarker to Invoke-DevDeployShim
 
 ## [0.3.6] - 2026-08-03
 
