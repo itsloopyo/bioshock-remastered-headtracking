@@ -86,13 +86,17 @@ struct Effective {
     remote_smoothing_bits: u64,
     rotation_enabled: bool,
     position_enabled: bool,
+    collision_enabled: bool,
+    collision_release_smoothing_bits: u32,
     toggle: Vec<(u32, i32)>,
     cycle_mode: Vec<(u32, i32)>,
     yaw_mode: Vec<(u32, i32)>,
 }
 
 /// v0.5.0 as it ran on what its reader gave: tracking on at start, both axes on, port 4242,
-/// End or Ctrl+Shift+Y, PageUp or Ctrl+Shift+G, and the yaw key or Ctrl+Shift+H.
+/// a lean held off the walls on every frame at LeanClampSettings' release_smoothing of 0.9
+/// (src/lean_clamp.cpp and core's lean_clamp.h at v0.5.0's pin, c480d8a), End or
+/// Ctrl+Shift+Y, PageUp or Ctrl+Shift+G, and the yaw key or Ctrl+Shift+H.
 fn from_legacy(world_space_yaw: bool, yaw_mode_key: i32, local: f64, remote: f64) -> Effective {
     Effective {
         enable_on_startup: true,
@@ -102,6 +106,8 @@ fn from_legacy(world_space_yaw: bool, yaw_mode_key: i32, local: f64, remote: f64
         remote_smoothing_bits: remote.to_bits(),
         rotation_enabled: true,
         position_enabled: true,
+        collision_enabled: true,
+        collision_release_smoothing_bits: 0.9_f32.to_bits(),
         toggle: vec![(0, 0x23), (CTRL_SHIFT, 'Y' as i32)],
         cycle_mode: vec![(0, 0x21), (CTRL_SHIFT, 'G' as i32)],
         yaw_mode: vec![(0, yaw_mode_key), (CTRL_SHIFT, 'H' as i32)],
@@ -124,6 +130,8 @@ fn differences(a: &Effective, b: &Effective) -> Vec<String> {
     field!(remote_smoothing_bits);
     field!(rotation_enabled);
     field!(position_enabled);
+    field!(collision_enabled);
+    field!(collision_release_smoothing_bits);
     field!(toggle);
     field!(cycle_mode);
     field!(yaw_mode);
@@ -210,6 +218,8 @@ fn from_migration(settings: &Settings, owner: &Owner) -> Effective {
         remote_smoothing_bits: settings.remote_smoothing.to_bits(),
         rotation_enabled: settings.rotation_enabled,
         position_enabled: settings.position_enabled,
+        collision_enabled: settings.collision_enabled,
+        collision_release_smoothing_bits: settings.collision_release_smoothing.to_bits(),
         toggle: support::hotkey_bindings(owner, Hotkey::Toggle),
         cycle_mode: support::hotkey_bindings(owner, Hotkey::CycleMode),
         yaw_mode: support::hotkey_bindings(owner, Hotkey::YawMode),
@@ -632,6 +642,11 @@ fn write_altered_defaults(builtin: &Path, altered: &Path) {
         ("EnableOnStartup=true", "EnableOnStartup=false"),
         ("WorldSpaceYaw=true", "WorldSpaceYaw=false"),
         ("PositionEnabled=true", "PositionEnabled=false"),
+        ("CollisionEnabled=true", "CollisionEnabled=false"),
+        (
+            "CollisionReleaseSmoothing=0.9",
+            "CollisionReleaseSmoothing=0.5",
+        ),
         ("LocalSmoothing=0.0", "LocalSmoothing=0.3"),
         ("RemoteSmoothing=0.15", "RemoteSmoothing=0.5"),
         ("ToggleKey=End, Ctrl+Shift+Y", "ToggleKey=F8"),

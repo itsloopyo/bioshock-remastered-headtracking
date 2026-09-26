@@ -9,7 +9,7 @@
 use std::ffi::{c_char, c_void};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use once_cell::sync::OnceCell;
 
@@ -37,6 +37,8 @@ struct RawSettings {
     position_enabled: u8,
     local_smoothing: f64,
     remote_smoothing: f64,
+    collision_enabled: u8,
+    collision_release_smoothing: f32,
 }
 
 /// The settings the session starts on. The hotkey lists stay with the owner, which
@@ -50,6 +52,8 @@ pub struct Settings {
     pub position_enabled: bool,
     pub local_smoothing: f64,
     pub remote_smoothing: f64,
+    pub collision_enabled: bool,
+    pub collision_release_smoothing: f32,
 }
 
 impl From<RawSettings> for Settings {
@@ -62,6 +66,8 @@ impl From<RawSettings> for Settings {
             position_enabled: raw.position_enabled != 0,
             local_smoothing: raw.local_smoothing,
             remote_smoothing: raw.remote_smoothing,
+            collision_enabled: raw.collision_enabled != 0,
+            collision_release_smoothing: raw.collision_release_smoothing,
         }
     }
 }
@@ -318,6 +324,18 @@ static LOCAL_SMOOTHING_BITS: AtomicU64 =
 static REMOTE_SMOOTHING_BITS: AtomicU64 =
     AtomicU64::new(crate::smoothing::DEFAULT_REMOTE_SMOOTHING.to_bits());
 
+/// Whether a lean stops at walls, and how gently it reopens once they clear, as loaded.
+static COLLISION_ENABLED: AtomicBool = AtomicBool::new(true);
+static COLLISION_RELEASE_SMOOTHING_BITS: AtomicU32 = AtomicU32::new(0.9_f32.to_bits());
+
+pub fn collision_enabled() -> bool {
+    COLLISION_ENABLED.load(Ordering::Acquire)
+}
+
+pub fn collision_release_smoothing() -> f32 {
+    f32::from_bits(COLLISION_RELEASE_SMOOTHING_BITS.load(Ordering::Acquire))
+}
+
 /// Smoothing applied when the tracker runs on this machine (loopback).
 pub fn local_smoothing() -> f64 {
     f64::from_bits(LOCAL_SMOOTHING_BITS.load(Ordering::Acquire))
@@ -336,6 +354,20 @@ pub fn load(folder: &Path) -> Settings {
     write_log(&lines);
     LOCAL_SMOOTHING_BITS.store(settings.local_smoothing.to_bits(), Ordering::Release);
     REMOTE_SMOOTHING_BITS.store(settings.remote_smoothing.to_bits(), Ordering::Release);
+    COLLISION_ENABLED.store(settings.collision_enabled, Ordering::Release);
+    COLLISION_RELEASE_SMOOTHING_BITS.store(
+        settings.collision_release_smoothing.to_bits(),
+        Ordering::Release,
+    );
+    log::info!(
+        "lean collision: {}, release smoothing {}",
+        if settings.collision_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        settings.collision_release_smoothing
+    );
     settings
 }
 

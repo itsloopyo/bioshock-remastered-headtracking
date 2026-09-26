@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <string>
 
+#include "cameraunlock/camera/lean_clamp.h"
 #include "cameraunlock/config/config_owner.h"
 #include "cameraunlock/config/config_table.h"
 #include "cameraunlock/config/defaults_file.h"
@@ -42,6 +43,8 @@ struct BsrSettings {
     std::uint8_t position_enabled;
     double local_smoothing;
     double remote_smoothing;
+    std::uint8_t collision_enabled;
+    float collision_release_smoothing;
 };
 
 }  // extern "C"
@@ -61,6 +64,9 @@ struct Config {
     // double, because the pipeline smooths in double and v0.5.0 read these as double.
     double local_smoothing = cameraunlock::math::kDefaultLocalSmoothing;
     double remote_smoothing = cameraunlock::math::kDefaultRemoteSmoothing;
+    // The lean sweep, and how gently a lean reopens once a wall clears.
+    bool collision_enabled = true;
+    float collision_release_smoothing = cameraunlock::camera::LeanClampSettings{}.release_smoothing;
     std::string toggle_key{cameraunlock::config::schema::ConceptTraits<
         cameraunlock::config::schema::Concept::ToggleKey>::kCanonicalDefault};
     std::string cycle_tracking_mode_key{cameraunlock::config::schema::ConceptTraits<

@@ -7,9 +7,10 @@ extern "C" void reset_lean_clamp() {
 }
 
 extern "C" void apply_lean_clamp(float* offset, float delta_time, float skin,
-                                int blocked, float distance) {
+                                float release_smoothing, int blocked, float distance) {
     cameraunlock::camera::LeanClampSettings settings;
     settings.skin = skin;
+    settings.release_smoothing = release_smoothing;
     clamp.SetSettings(settings);
     cameraunlock::camera::LeanObstruction hit{true, blocked != 0, distance};
     const auto query = [](void* context, const cameraunlock::math::Vec3&,

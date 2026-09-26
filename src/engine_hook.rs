@@ -81,7 +81,14 @@ struct Hit {
 }
 
 extern "C" {
-    fn apply_lean_clamp(offset: *mut f32, delta_time: f32, skin: f32, blocked: i32, distance: f32);
+    fn apply_lean_clamp(
+        offset: *mut f32,
+        delta_time: f32,
+        skin: f32,
+        release_smoothing: f32,
+        blocked: i32,
+        distance: f32,
+    );
     fn reset_lean_clamp();
 }
 
@@ -431,7 +438,7 @@ unsafe extern "thiscall" fn camera_scene_node_detour(
         ];
         let desired = offset.iter().map(|value| value * value).sum::<f32>().sqrt();
         let skin = (world_projection.0[3][2] / world_projection.0[2][2]).abs() + 1.0;
-        if desired > 0.0001 {
+        if desired > 0.0001 && crate::config::collision_enabled() {
             let distance = desired + skin;
             let hit = trace(
                 actor,
@@ -447,6 +454,7 @@ unsafe extern "thiscall" fn camera_scene_node_detour(
                 offset.as_mut_ptr(),
                 now.saturating_sub(previous) as f32 / 1000.0,
                 skin,
+                crate::config::collision_release_smoothing(),
                 i32::from(hit.actor != 0),
                 hit.time * distance,
             );

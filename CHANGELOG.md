@@ -24,6 +24,7 @@
 - When the mod starts and finds no `Defaults.ini`, it creates one holding the built-in values, unless Windows runs the game as a packaged app. The mod never changes `Defaults.ini` after that.
 - The tracking mode (`Page Up` / `Ctrl+Shift+G`) and the yaw mode (`Page Down` / `Ctrl+Shift+H`) are saved to `CameraUnlock.ini` when you change them, as `RotationEnabled` and `PositionEnabled`, and `WorldSpaceYaw`, and the next start begins in them. Earlier versions started in rotation and position every time and never saved the yaw mode.
 - New settings: `UdpPort` (the port the mod listens on, 4242 by default), `EnableOnStartup` (whether tracking is on when the game starts, true by default), and `ToggleKey` and `CycleTrackingModeKey`, which were fixed keys before. `YawModeKey` now holds its chord too.
+- New settings under `[Position]`: `CollisionEnabled` (whether a lean stops at walls, true by default) and `CollisionReleaseSmoothing` (how gently the view eases back out after a wall stopped a lean, 0.9 by default). Earlier versions always stopped a lean at walls, with that same release, and had no setting for either.
 
 ## [0.5.0] - 2026-09-17
 

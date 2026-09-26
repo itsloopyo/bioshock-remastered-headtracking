@@ -26,8 +26,9 @@ constexpr std::int32_t kLegacyUnread = 2;
 
 // Everything v0.5.0 did not read from the file stays at its default: it always started with
 // tracking on and both axes on, on port 4242, with End or Ctrl+Shift+Y and PageUp or
-// Ctrl+Shift+G, which are the defaults here too. Its yaw key always fired on Ctrl+Shift+H as
-// well, and the frozen reader only hands back a code from 0x01 to 0xFE.
+// Ctrl+Shift+G, and always held a lean off the walls at LeanClampSettings' default release,
+// which are the defaults here too. Its yaw key always fired on Ctrl+Shift+H as well, and the
+// frozen reader only hands back a code from 0x01 to 0xFE.
 void MapLegacy(const BsrLegacyConfig& c, Config& out) {
     out.world_space_yaw = c.world_space_yaw != 0;
     out.yaw_mode_key = cameraunlock::input::FormatKeyBindings(
@@ -51,6 +52,8 @@ cameraunlock::config::ConfigTable<Config> ConfigTable() {
         .Concept<C::RemoteSmoothing>(&Config::remote_smoothing)
         .Concept<C::PositionEnabled>(&Config::position_enabled)
         .Writable()
+        .Concept<C::CollisionEnabled>(&Config::collision_enabled)
+        .Concept<C::CollisionReleaseSmoothing>(&Config::collision_release_smoothing)
         .Concept<C::ToggleKey>(&Config::toggle_key)
         .Concept<C::CycleTrackingModeKey>(&Config::cycle_tracking_mode_key)
         .Concept<C::YawModeKey>(&Config::yaw_mode_key);
@@ -134,6 +137,8 @@ BsrSettings ToSettings(const Config& c) {
     s.position_enabled = c.position_enabled;
     s.local_smoothing = c.local_smoothing;
     s.remote_smoothing = c.remote_smoothing;
+    s.collision_enabled = c.collision_enabled;
+    s.collision_release_smoothing = c.collision_release_smoothing;
     return s;
 }
 

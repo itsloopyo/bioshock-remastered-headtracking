@@ -67,6 +67,8 @@ fn built_in() -> Settings {
         position_enabled: true,
         local_smoothing: 0.0,
         remote_smoothing: 0.15,
+        collision_enabled: true,
+        collision_release_smoothing: 0.9,
     }
 }
 
@@ -142,7 +144,8 @@ fn default_rows_follow_defaults_ini() {
     std::fs::write(
         defaults,
         "[Network]\r\nUdpPort=5000\r\n[General]\r\nEnableOnStartup=false\r\nWorldSpaceYaw=false\r\n\
-         [Position]\r\nPositionEnabled=false\r\n[Smoothing]\r\nLocalSmoothing=0.3\r\n\
+         [Position]\r\nPositionEnabled=false\r\nCollisionEnabled=false\r\n\
+         CollisionReleaseSmoothing=0.5\r\n[Smoothing]\r\nLocalSmoothing=0.3\r\n\
          [Hotkeys]\r\nToggleKey=F8\r\n",
     )
     .unwrap();
@@ -159,6 +162,8 @@ fn default_rows_follow_defaults_ini() {
             position_enabled: false,
             local_smoothing: 0.3,
             remote_smoothing: 0.15,
+            collision_enabled: false,
+            collision_release_smoothing: 0.5,
         }
     );
     assert_eq!(
