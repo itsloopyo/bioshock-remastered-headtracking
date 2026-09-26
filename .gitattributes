@@ -101,3 +101,6 @@ docker-compose*.yml text eol=lf
 
 # Byte-exact test data: the config differential test reads these files as a player's own.
 tests/config_differential/data/** -text
+
+# The committed canonical config: its bytes, CRLF included, are the file the mod creates.
+config/CameraUnlock.ini -text

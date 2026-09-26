@@ -21,6 +21,11 @@ crate-type = ["cdylib", "rlib"]
 test-support = []
 
 [[test]]
+name = "config_owner"
+path = "tests/config_owner.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "config_differential"
 path = "tests/config_differential/main.rs"
 harness = false

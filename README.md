@@ -7,6 +7,10 @@ Blind Squirrel Entertainment, shown to demonstrate what the mod does.</sub>
 
 An unofficial head tracking mod for BioShock Remastered that moves the view with your head while your mouse or controller keeps aiming, driven by a webcam, phone, or any OpenTrack compatible tracker, with no VR headset required.
 
+> **Updating from 0.5.0 or earlier:** settings now live in `Build\Final\CameraUnlock.ini`.
+> The first start of this version copies your settings from `bioshock_headtrack.ini` into it
+> and leaves `bioshock_headtrack.ini` as it was. See [Configuration](#configuration).
+
 ## Features
 
 - **Decoupled look and aim** - head tracking moves the view; your
@@ -20,7 +24,8 @@ An unofficial head tracking mod for BioShock Remastered that moves the view with
 - A purchased copy of **BioShock Remastered** on Steam (AppID 409710).
 - **Windows 10 / 11**.
 - A tracking source that speaks OpenTrack UDP. Anything that can send
-  48-byte OpenTrack packets to port 4242 works.
+  48-byte OpenTrack packets to port 4242 works (`UdpPort` in the
+  [configuration](#configuration) changes the port).
 
 ## Installation
 
@@ -111,13 +116,23 @@ view sits off to one side, centre it in the tracker.
 
 ## Controls
 
-Two equivalent binding sets - use whichever your keyboard has:
+Each action fires on any key in its list. The defaults are a nav-cluster key and
+a chord, so use whichever your keyboard has:
 
-| Action              | Nav-cluster | Chord           |
-|---------------------|-------------|-----------------|
-| Toggle tracking     | `End`       | `Ctrl+Shift+Y`  |
-| Cycle tracking mode | `Page Up`   | `Ctrl+Shift+G`  |
-| Toggle yaw mode     | `Page Down` | `Ctrl+Shift+H`  |
+| Action              | Setting                | Nav-cluster | Chord           |
+|---------------------|------------------------|-------------|-----------------|
+| Toggle tracking     | `ToggleKey`            | `End`       | `Ctrl+Shift+Y`  |
+| Cycle tracking mode | `CycleTrackingModeKey` | `Page Up`   | `Ctrl+Shift+G`  |
+| Toggle yaw mode     | `YawModeKey`           | `Page Down` | `Ctrl+Shift+H`  |
+
+Change the keys in the [configuration](#configuration), as key names separated
+by commas: `ToggleKey=End, Ctrl+Shift+Y`. A key without Ctrl or Shift does not
+fire while Ctrl and Shift are both held.
+
+The tracking mode and the yaw mode are saved to `CameraUnlock.ini` as soon as
+you change them, so the next start picks up where you left off. Toggling
+tracking with `End` lasts for the session only: each start follows
+`EnableOnStartup`.
 
 `Page Up` / `Ctrl+Shift+G` cycles tracking mode:
 
@@ -137,33 +152,103 @@ cluster.
 
 ## Configuration
 
-The mod writes a self-documenting `bioshock_headtrack.ini` to
-`BioShock Remastered/Build/Final/` on first launch.
+<!-- cameraunlock:config -->
+The mod reads its settings from `Build\Final\CameraUnlock.ini` in the game folder, and creates the file when it starts and finds none. Edit it with any text editor.
+
+A setting set to `default` takes its value from `Defaults.ini`, which every head tracking mod that keeps its settings in `CameraUnlock.ini` reads. Head tracking mods that keep their settings in another file do not read it, and neither do earlier versions of this mod. Writing a value in place of `default` changes that setting for this game only. When the mod saves a setting that a hotkey changed in game, it writes the new value in place of `default`, so that setting no longer follows `Defaults.ini` in this game until you set it to `default` again.
+
+`Defaults.ini` is `%AppData%\CameraUnlock\Defaults.ini` on Windows; `$XDG_CONFIG_HOME/CameraUnlock/Defaults.ini` on Linux, or `~/.config/CameraUnlock/Defaults.ini` where `XDG_CONFIG_HOME` is not set, under Wine and Proton too; and `~/Library/Application Support/CameraUnlock/Defaults.ini` on macOS. The mod's log, where it writes one, names the file it read.
+
+When the mod starts and finds no `Defaults.ini`, it creates one holding the built-in values, unless Windows runs the game as a packaged app. The mod never changes `Defaults.ini` after that. Edit it with any text editor.
+
+Earlier versions of the mod kept these settings in `bioshock_headtrack.ini`, in the same folder. The first time this version starts and finds no `CameraUnlock.ini`, it reads your settings from `bioshock_headtrack.ini` and writes them into `CameraUnlock.ini`. It never changes `bioshock_headtrack.ini`, and does not read it again while `CameraUnlock.ini` exists.
+
+A setting that the defaults below set to `default` is written as `default` when the value imported for it equals its default at that start, which is the value `Defaults.ini` gives it, or the built-in value where `Defaults.ini` gives none. It then follows `Defaults.ini`. Every other setting is written with the value imported for it. `RotationEnabled` and `PositionEnabled` are one setting here, the tracking mode, so both are written as `default` or neither is.
+
+Comments, and keys the mod never read, are not carried over. Nor are these, where your old file had them:
+
+- Reticle settings, and a key that toggled the reticle.
+- A sensitivity, scale, deadzone, response curve or axis inversion you changed from its default. Set these in your tracker instead.
+- The setting for a feature that earlier versions shipped switched off while it was untested. It now follows the mod's default.
+
+An older version of the mod reads `bioshock_headtrack.ini` and never reads `CameraUnlock.ini`, so a setting you change after updating is not in `bioshock_headtrack.ini`.
+
+Deleting only `CameraUnlock.ini` makes the next start read `bioshock_headtrack.ini` again. To go back to the defaults, replace everything in `CameraUnlock.ini` with the defaults below. Every setting they set to `default` then follows `Defaults.ini`.
+
+The built-in value of each setting set to `default` below:
+
+- `UdpPort=4242`
+- `EnableOnStartup=true`
+- `WorldSpaceYaw=true`
+- `RotationEnabled=true`
+- `LocalSmoothing=0.0`
+- `RemoteSmoothing=0.15`
+- `PositionEnabled=true`
+- `ToggleKey=End, Ctrl+Shift+Y`
+- `CycleTrackingModeKey=PageUp, Ctrl+Shift+G`
+- `YawModeKey=PageDown, Ctrl+Shift+H`
+
+With every setting at its default, the file reads:
 
 ```ini
-[General]
-; Yaw mode: true = horizon-locked yaw (default), false = camera-local
-WorldSpaceYaw=true
+; BioShock Remastered head tracking settings.
+; Comments start with ; and go on their own line. Text after a value is part of the value.
+; Hotkeys are key names such as End, PageUp or Ctrl+Shift+Y. Separate several with commas; leave empty for none.
+; A setting set to default takes its value from Defaults.ini, which every head tracking mod
+; that keeps its settings in CameraUnlock.ini reads: %AppData%\CameraUnlock\Defaults.ini on
+; Windows, $XDG_CONFIG_HOME/CameraUnlock/Defaults.ini (normally ~/.config/CameraUnlock) on
+; Linux, under Wine and Proton too, and ~/Library/Application Support/CameraUnlock/Defaults.ini
+; on macOS. The log names the file it read. Write a value instead of default to change that
+; setting for this game only.
 
-[Hotkeys]
-; Page Down - toggle world/local yaw
-YawModeKey=0x22
+[CameraUnlock]
+; Written by the mod. Leave this section in place.
+ConfigFormat=1
+
+[Network]
+; UDP port the mod receives tracker data on (OpenTrack protocol).
+UdpPort=default
+
+[General]
+; true: head tracking is on when the game starts. ToggleKey turns it on and off.
+EnableOnStartup=default
+; true: yaw turns around the world's up axis. false: around the camera's own up axis.
+WorldSpaceYaw=default
+; true: turning your head turns the view.
+; Tracking mode at startup, with PositionEnabled. The mode hotkey changes both.
+RotationEnabled=default
 
 [Smoothing]
-; Smoothing applied when the tracker runs on this machine (loopback).
-; 0 = no smoothing, 1 = heavy. Covers rotation and position.
-LocalSmoothing=0.0
-; Smoothing applied when the tracker is a remote device on the network.
-; 0 = no smoothing, 1 = heavy. Covers rotation and position.
-RemoteSmoothing=0.15
+; Smoothing when the tracker runs on this PC. 0 is the least, 1 the most.
+LocalSmoothing=default
+; Smoothing when the tracker is another device on the network, such as a phone.
+; 0 is the least, 1 the most.
+RemoteSmoothing=default
+
+[Position]
+; true: moving your head moves the view.
+; Tracking mode at startup, with RotationEnabled. The mode hotkey changes both.
+PositionEnabled=default
+
+[Hotkeys]
+; Turns head tracking on and off.
+ToggleKey=default
+; Changes the tracking mode: rotation and position, rotation only, position only.
+CycleTrackingModeKey=default
+; Switches yaw between the world's up axis and the camera's own (WorldSpaceYaw).
+YawModeKey=default
 ```
+<!-- /cameraunlock:config -->
 
 ### Smoothing
 
-| Key | Default | Range | Applies to |
-|-----|---------|-------|------------|
+| Key | Built-in value | Range | Applies to |
+|-----|----------------|-------|------------|
 | `LocalSmoothing` | 0.0 | 0.0 - 1.0 | Smoothing applied when the tracker runs on this machine (loopback). 0 = no smoothing, 1 = heavy. |
 | `RemoteSmoothing` | 0.15 | 0.0 - 1.0 | Smoothing applied when the tracker is a remote device on the network. 0 = no smoothing, 1 = heavy. |
+
+A value outside 0.0 - 1.0 is not read: the log names the line, and the setting
+keeps its default.
 
 Both cover rotation and position; there is no separate position
 smoothing setting. The mod reads the source address of each tracking

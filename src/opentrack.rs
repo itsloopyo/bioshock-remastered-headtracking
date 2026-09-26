@@ -1,6 +1,6 @@
 //! OpenTrack UDP protocol handler
 //!
-//! Receives 3DOF head tracking data from OpenTrack via UDP on port 4242.
+//! Receives head tracking data from OpenTrack via UDP on the config's UdpPort.
 //! The OpenTrack UDP protocol sends 48 bytes containing 6 IEEE 754
 //! little-endian doubles: x, y, z, yaw, pitch, roll.
 //! We only use yaw, pitch, roll for 3DOF tracking.
@@ -27,9 +27,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::tracking::{
     update_position_atomic, update_rotation_atomic, ATOMIC_SAMPLE_SEQ, GLOBAL_STATE,
 };
-
-/// OpenTrack UDP port (project-standard default).
-pub const OPENTRACK_PORT: u16 = 4242;
 
 /// OpenTrack packet size: 6 doubles * 8 bytes = 48 bytes
 pub const PACKET_SIZE: usize = 48;
@@ -187,7 +184,7 @@ fn is_remote_address(addr: &SocketAddr) -> bool {
 
 /// Spawn the OpenTrack UDP receiver thread.
 ///
-/// The thread first tries to bind `0.0.0.0:4242`. If another process is
+/// The thread first tries to bind `0.0.0.0:<port>`, the config's UdpPort. If another process is
 /// holding the port, it retries every 5s (logging every 30s) until either
 /// the bind succeeds or shutdown is requested. The rest of the mod
 /// (engine hook, hotkey poller, D3D overlay) keeps running through the
@@ -195,9 +192,9 @@ fn is_remote_address(addr: &SocketAddr) -> bool {
 /// to life with no game restart. Binding to all interfaces lets
 /// phone-based trackers send directly without an OpenTrack relay on the
 /// PC.
-pub fn start_receiver() {
-    thread::spawn(|| {
-        let Some(socket) = bind_with_retry() else {
+pub fn start_receiver(port: u16) {
+    thread::spawn(move || {
+        let Some(socket) = bind_with_retry(port) else {
             return;
         };
         if let Err(e) = socket.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS))) {
@@ -208,18 +205,18 @@ pub fn start_receiver() {
     });
 }
 
-fn bind_with_retry() -> Option<UdpSocket> {
-    let addr = format!("0.0.0.0:{}", OPENTRACK_PORT);
+fn bind_with_retry(port: u16) -> Option<UdpSocket> {
+    let addr = format!("0.0.0.0:{}", port);
 
     match UdpSocket::bind(&addr) {
         Ok(socket) => {
-            log::info!("OpenTrack receiver started on port {}", OPENTRACK_PORT);
+            log::info!("OpenTrack receiver started on port {}", port);
             return Some(socket);
         }
         Err(e) => {
             log::error!(
                 "Failed to bind UDP port {} ({}) -- will retry every {}ms",
-                OPENTRACK_PORT,
+                port,
                 e,
                 BIND_RETRY_INTERVAL_MS
             );
@@ -240,18 +237,14 @@ fn bind_with_retry() -> Option<UdpSocket> {
         attempts += 1;
         match UdpSocket::bind(&addr) {
             Ok(socket) => {
-                log::info!(
-                    "Bound UDP port {} after {} retries",
-                    OPENTRACK_PORT,
-                    attempts
-                );
+                log::info!("Bound UDP port {} after {} retries", port, attempts);
                 return Some(socket);
             }
             Err(_) => {
                 if attempts.is_multiple_of(attempts_per_log) {
                     log::warn!(
                         "Still waiting for UDP port {} ({}s elapsed)",
-                        OPENTRACK_PORT,
+                        port,
                         attempts * BIND_RETRY_INTERVAL_MS / 1000
                     );
                 }
@@ -596,11 +589,6 @@ mod tests {
         // Verify PACKET_SIZE matches 6 * 8 bytes
         assert_eq!(PACKET_SIZE, 48);
         assert_eq!(PACKET_SIZE, 6 * std::mem::size_of::<f64>());
-    }
-
-    #[test]
-    fn test_port_constant() {
-        assert_eq!(OPENTRACK_PORT, 4242);
     }
 
     /// Integration test: verify UDP receiver can receive and parse packets

@@ -10,15 +10,46 @@ fn cpp() -> cc::Build {
     build
 }
 
+// cameraunlock-core's config owner and its dependencies, the hotkey list parser and the
+// poller that runs the lists.
+const CORE_SOURCES: &[&str] = &[
+    "config/canonical_ini.cpp",
+    "config/checked_file_writer.cpp",
+    "config/config_owner.cpp",
+    "config/config_table.cpp",
+    "config/defaults_ini.cpp",
+    "config/defaults_location.cpp",
+    "config/head_tracking_config.cpp",
+    "config/hotkey_codec.cpp",
+    "config/ini_editor.cpp",
+    "config/ini_reader.cpp",
+    "config/legacy_import.cpp",
+    "config/value_codecs.cpp",
+    "config/value_guards.cpp",
+    "input/hotkey_poller.cpp",
+    "input/key_bindings.cpp",
+];
+
 fn main() {
-    cpp().file("src/lean_clamp.cpp").compile("lean_clamp");
+    let mut mod_cpp = cpp();
+    mod_cpp
+        .file("src/lean_clamp.cpp")
+        .file("src/config_owner.cpp");
+    for source in CORE_SOURCES {
+        mod_cpp.file(format!("cameraunlock-core/cpp/src/{source}"));
+    }
+    mod_cpp.compile("bsr_cpp");
     println!("cargo:rerun-if-changed=src/lean_clamp.cpp");
+    println!("cargo:rerun-if-changed=src/config_owner.cpp");
+    println!("cargo:rerun-if-changed=src/config_owner.h");
     println!("cargo:rerun-if-changed=cameraunlock-core/cpp/include");
+    println!("cargo:rerun-if-changed=cameraunlock-core/cpp/src");
 
     // The differential and config tests reach core through these. Cargo sets the variable
     // only for a build with the test-support feature, so the shipped DLL never carries them.
     if std::env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some() {
         cpp()
+            .include("src")
             .file("tests/support/test_support.cpp")
             .compile("bsr_test_support");
         println!("cargo:rerun-if-changed=tests/support");

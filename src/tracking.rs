@@ -26,16 +26,16 @@
 //! Rotation values use `AtomicU64` storing f64 bits for lock-free access.
 //! This provides ~10x faster reads compared to RwLock for the hot path.
 //!
-//! # Auto-enable
+//! # Startup
 //!
-//! `enabled` defaults to `true` so head tracking is active immediately when
-//! the game starts - users expect to plug in OpenTrack and have it just work.
+//! `apply_startup` sets the enabled flag, the tracking mode and the yaw mode
+//! from the config before anything reads them. `EnableOnStartup` defaults to
+//! true, so head tracking is active as soon as the game starts.
 
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 /// Atomic rotation storage for lock-free access on the hot path
 ///
@@ -114,7 +114,7 @@ impl Default for AtomicRotation {
 /// Global tracking state shared across all threads
 #[derive(Debug)]
 pub struct TrackingState {
-    /// Master enable flag (End / Ctrl+Shift+Y).
+    /// Master enable flag (ToggleKey).
     pub enabled: bool,
 
     /// Current yaw rotation from OpenTrack (degrees) - LEGACY, use atomic_rotation
@@ -126,31 +126,19 @@ pub struct TrackingState {
     /// Current roll rotation from OpenTrack (degrees) - LEGACY, use atomic_rotation
     pub roll: f64,
 
-    /// Rotational-tracking flag, cycled by the tracking-mode hotkey
-    /// (Page Up / Ctrl+Shift+G) alongside `position_enabled`.
+    /// Rotational-tracking flag, cycled by CycleTrackingModeKey
+    /// alongside `position_enabled`.
     pub rotation_enabled: bool,
 
-    /// 6DOF positional tracking flag, cycled by the tracking-mode
-    /// hotkey (Page Up / Ctrl+Shift+G) alongside `rotation_enabled`.
+    /// 6DOF positional tracking flag, cycled by CycleTrackingModeKey
+    /// alongside `rotation_enabled`.
     pub position_enabled: bool,
 
     /// True when in active gameplay, false during menus/cutscenes
     pub gameplay_active: bool,
 
-    /// Debounce timer for the tracking-enable toggle.
-    pub last_toggle_time: Instant,
-
-    /// Debounce timer for the tracking-mode cycle hotkey.
-    pub last_cycle_mode_time: Instant,
-
     /// Runtime yaw mode. True means horizon-locked world-space yaw.
     pub world_space_yaw: bool,
-
-    /// Debounce timer for the yaw-mode toggle hotkey.
-    pub last_yaw_mode_time: Instant,
-
-    /// Previous pressed state for the yaw-mode binding.
-    pub yaw_mode_was_down: bool,
 
     /// Signal for threads to shutdown
     pub shutdown_requested: bool,
@@ -190,7 +178,6 @@ pub static ATOMIC_WORLD_SPACE_YAW: AtomicBool = AtomicBool::new(true);
 
 impl Default for TrackingState {
     fn default() -> Self {
-        let now = Instant::now();
         Self {
             enabled: true,
             yaw: 0.0,
@@ -200,11 +187,7 @@ impl Default for TrackingState {
             position_enabled: true,
             // Start active - state detector defaults to Gameplay
             gameplay_active: true,
-            last_toggle_time: now,
-            last_cycle_mode_time: now,
-            world_space_yaw: ATOMIC_WORLD_SPACE_YAW.load(Ordering::Acquire),
-            last_yaw_mode_time: now - std::time::Duration::from_millis(crate::hotkeys::DEBOUNCE_MS),
-            yaw_mode_was_down: false,
+            world_space_yaw: true,
             shutdown_requested: false,
         }
     }
@@ -264,8 +247,37 @@ impl TrackingState {
     }
 }
 
-pub fn set_world_space_yaw_initial(enabled: bool) {
-    ATOMIC_WORLD_SPACE_YAW.store(enabled, Ordering::Release);
+/// Puts the session in the state the config starts it in, before the receiver, the
+/// hotkeys and the hooks run.
+pub fn apply_startup(settings: &crate::config::Settings) {
+    let mut state = GLOBAL_STATE.write();
+    state.enabled = settings.enable_on_startup;
+    state.rotation_enabled = settings.rotation_enabled;
+    state.position_enabled = settings.position_enabled;
+    state.world_space_yaw = settings.world_space_yaw;
+    ATOMIC_ENABLED.store(settings.enable_on_startup, Ordering::Release);
+    ATOMIC_ROTATION_ENABLED.store(settings.rotation_enabled, Ordering::Release);
+    ATOMIC_POSITION_ENABLED.store(settings.position_enabled, Ordering::Release);
+    ATOMIC_WORLD_SPACE_YAW.store(settings.world_space_yaw, Ordering::Release);
+    log::info!(
+        "Startup: tracking {}, mode {}, yaw {}",
+        if settings.enable_on_startup {
+            "on"
+        } else {
+            "off"
+        },
+        match (settings.rotation_enabled, settings.position_enabled) {
+            (true, true) => "rotation + position",
+            (true, false) => "rotation only",
+            (false, true) => "position only",
+            (false, false) => unreachable!("the config table reads no pair that names no mode"),
+        },
+        if settings.world_space_yaw {
+            "world-space"
+        } else {
+            "camera-local"
+        }
+    );
 }
 
 #[inline(always)]

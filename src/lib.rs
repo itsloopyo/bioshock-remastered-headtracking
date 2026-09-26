@@ -1,7 +1,7 @@
 //! BioShock Remastered Head Tracking Mod
 //!
-//! 6DOF head tracking for BioShock Remastered via OpenTrack UDP on the
-//! project-standard port 4242.
+//! 6DOF head tracking for BioShock Remastered via OpenTrack UDP, on port
+//! 4242 unless CameraUnlock.ini says otherwise.
 //!
 //! Ships as a DLL hijack via `xinput1_3.dll` drop-in. The game loads this
 //! proxy, which forwards XInput calls to the real library while we initialize
@@ -17,7 +17,7 @@
 #![allow(clippy::missing_safety_doc, clippy::missing_transmute_annotations)]
 
 mod compass;
-mod config;
+pub mod config;
 pub mod conformance;
 mod d3d;
 mod engine_hook;
@@ -186,8 +186,9 @@ fn load_real_xinput() -> Result<(), &'static str> {
 fn initialize_mod() {
     init_logging();
     log::info!("BioShock Head Tracking v{} loaded", VERSION);
-    config::load();
-    init_runtime_state();
+    let exe = std::env::current_exe().expect("the game executable's path");
+    let settings = config::load(exe.parent().expect("the executable's folder"));
+    init_runtime_state(&settings);
     install_engine_hook();
     install_d3d_hooks();
 }
@@ -236,14 +237,13 @@ fn init_logging() {
 }
 
 /// Bring up the runtime state shared across the OpenTrack receiver,
-/// the hotkey thread, and the engine / D3D hooks.
-fn init_runtime_state() {
-    // Touch the lazy global so it constructs before threads race for it.
-    let _ = &*GLOBAL_STATE;
+/// the hotkey poller, and the engine / D3D hooks.
+fn init_runtime_state(settings: &config::Settings) {
+    tracking::apply_startup(settings);
 
-    opentrack::start_receiver();
+    opentrack::start_receiver(settings.udp_port);
 
-    hotkeys::start_hotkey_thread();
+    hotkeys::start();
 }
 
 fn install_engine_hook() {

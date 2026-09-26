@@ -1,17 +1,26 @@
-//! The differential test for the config conversion. Every input is read two ways:
+//! The differential test for the config conversion. Every input is read three ways:
 //!
-//!   the oracle   the reader of v0.5.0, the newest published build: oracle/config.rs is
-//!                `git show v0.5.0:src/config.rs`, byte for byte, with the two crate items it
-//!                used restated below at their v0.5.0 values. It reads a relative path and
-//!                keeps its settings in statics, so each reading runs in a process of its own
-//!                (this binary, started with --oracle <folder>)
-//!   the import   the frozen reader in src/legacy_config/
+//!   the oracle     the reader of v0.5.0, the newest published build: oracle/config.rs is
+//!                  `git show v0.5.0:src/config.rs`, byte for byte, with the two crate items it
+//!                  used restated below at their v0.5.0 values. It reads a relative path and
+//!                  keeps its settings in statics, so each reading runs in a process of its own
+//!                  (this binary, started with --oracle <folder>)
+//!   the import     the frozen reader in src/legacy_config/
+//!   the migration  the config owner in a folder holding only bioshock_headtrack.ini, importing
+//!                  it into a new CameraUnlock.ini, then the canonical reader and the table on
+//!                  what it wrote
 //!
 //! Each reading is reduced to what a player's file decides: every setting, the tracking state
-//! the mod starts in and the keys it binds.
+//! the mod starts in and the keys it registers.
 //!
 //! Comparison 1, oracle against import, finds nothing: no commit since v0.5.0 changed how the
-//! file is read.
+//! file is read. Comparison 2, import against migration, finds nothing either: no approved
+//! change or normalisation in core's data/config-format.json applies to what v0.5.0 read. It
+//! runs over a Defaults.ini at the built-in values and over one a player changed, since the
+//! migration writes default exactly where the imported value equals what Defaults.ini gives.
+//!
+//! The distinct migrated files go to target/config-differential-migrated, where
+//! lint-migrated.mjs runs core's canonical config lint over them after this binary.
 //!
 //! data/ holds the first-run output of every published build, the template each wrote where it
 //! found no file: v0.1.0 (the same bytes through v0.3.2), v0.3.3 (through v0.3.6), v0.4.0 and
@@ -25,11 +34,18 @@
 //!   src/legacy_config/mod.rs    dfcf17c06fb1b6ac0de35821e9b069144e7475f02ffea9210637beceb1f4cab2
 //! The frozen reader is Rust's standard library and nothing of cameraunlock-core.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use bioshock_headtrack::config::{Line, Owner, Settings};
 use bioshock_headtrack::legacy_config;
+
+#[path = "../support/mod.rs"]
+mod support;
+
+use support::{corpus, Hotkey};
 
 mod smoothing {
     // src/smoothing.rs at v0.5.0.
@@ -184,6 +200,22 @@ fn run_oracle(dir: &Path) {
     );
 }
 
+/// The migration's settings as the mod starts on them, and the keys it registers.
+fn from_migration(settings: &Settings, owner: &Owner) -> Effective {
+    Effective {
+        enable_on_startup: settings.enable_on_startup,
+        udp_port: settings.udp_port,
+        world_space_yaw: settings.world_space_yaw,
+        local_smoothing_bits: settings.local_smoothing.to_bits(),
+        remote_smoothing_bits: settings.remote_smoothing.to_bits(),
+        rotation_enabled: settings.rotation_enabled,
+        position_enabled: settings.position_enabled,
+        toggle: support::hotkey_bindings(owner, Hotkey::Toggle),
+        cycle_mode: support::hotkey_bindings(owner, Hotkey::CycleMode),
+        yaw_mode: support::hotkey_bindings(owner, Hotkey::YawMode),
+    }
+}
+
 /// The frozen reader, and what v0.5.0 ran on where it read no file.
 fn import_config(path: &Path) -> legacy_config::Config {
     match legacy_config::read(path) {
@@ -207,145 +239,6 @@ fn read_import(root: &Path, input: &Input) -> Effective {
 }
 
 // ---- the inputs -----------------------------------------------------------------------------
-
-mod corpus {
-    use std::ffi::{c_char, c_int, c_void, CString};
-
-    #[repr(C)]
-    struct LegacyKey {
-        section: *const c_char,
-        key: *const c_char,
-    }
-
-    #[repr(C)]
-    struct MutationKey {
-        section: *const c_char,
-        key: *const c_char,
-        alternate: *const c_char,
-        out_of_range: *const *const c_char,
-        out_of_range_len: usize,
-        hotkey: c_int,
-    }
-
-    type EmitPair = unsafe extern "C" fn(*mut c_void, *const c_char, usize, *const c_char, usize);
-    type EmitText = unsafe extern "C" fn(*mut c_void, *const c_char, usize);
-
-    extern "C" {
-        fn bsr_test_ini_mutations(
-            base: *const c_char,
-            base_len: usize,
-            reads: *const LegacyKey,
-            reads_len: usize,
-            keys: *const MutationKey,
-            keys_len: usize,
-            emit: EmitPair,
-            error: EmitText,
-            context: *mut c_void,
-        ) -> c_int;
-    }
-
-    /// One key the frozen reader reads, for core's corpus generator.
-    pub struct Descriptor {
-        pub section: &'static str,
-        pub key: &'static str,
-        pub alternate: &'static str,
-        pub out_of_range: &'static [&'static str],
-        pub hotkey: bool,
-    }
-
-    struct Sink {
-        out: Vec<(String, Vec<u8>)>,
-        error: Option<String>,
-    }
-
-    unsafe fn slice<'a>(data: *const c_char, len: usize) -> &'a [u8] {
-        std::slice::from_raw_parts(data.cast(), len)
-    }
-
-    unsafe extern "C" fn emit(
-        context: *mut c_void,
-        name: *const c_char,
-        name_len: usize,
-        bytes: *const c_char,
-        bytes_len: usize,
-    ) {
-        let sink = &mut *context.cast::<Sink>();
-        sink.out.push((
-            String::from_utf8(slice(name, name_len).to_vec()).unwrap(),
-            slice(bytes, bytes_len).to_vec(),
-        ));
-    }
-
-    unsafe extern "C" fn error(context: *mut c_void, text: *const c_char, len: usize) {
-        let sink = &mut *context.cast::<Sink>();
-        sink.error = Some(String::from_utf8_lossy(slice(text, len)).into_owned());
-    }
-
-    /// core's GenerateIniMutations over `base`, reading `reads` and describing each with
-    /// `keys`. It refuses keys and descriptors that differ.
-    pub fn generate(
-        base: &[u8],
-        reads: &[(&str, &str)],
-        keys: &[Descriptor],
-    ) -> Vec<(String, Vec<u8>)> {
-        let c = |s: &str| CString::new(s).unwrap();
-        let read_strings: Vec<(CString, CString)> =
-            reads.iter().map(|(s, k)| (c(s), c(k))).collect();
-        let read_keys: Vec<LegacyKey> = read_strings
-            .iter()
-            .map(|(s, k)| LegacyKey {
-                section: s.as_ptr(),
-                key: k.as_ptr(),
-            })
-            .collect();
-        let key_strings: Vec<(CString, CString, CString, Vec<CString>)> = keys
-            .iter()
-            .map(|d| {
-                (
-                    c(d.section),
-                    c(d.key),
-                    c(d.alternate),
-                    d.out_of_range.iter().map(|v| c(v)).collect(),
-                )
-            })
-            .collect();
-        let range_pointers: Vec<Vec<*const c_char>> = key_strings
-            .iter()
-            .map(|(_, _, _, r)| r.iter().map(|v| v.as_ptr()).collect())
-            .collect();
-        let mutation_keys: Vec<MutationKey> = keys
-            .iter()
-            .enumerate()
-            .map(|(i, d)| MutationKey {
-                section: key_strings[i].0.as_ptr(),
-                key: key_strings[i].1.as_ptr(),
-                alternate: key_strings[i].2.as_ptr(),
-                out_of_range: range_pointers[i].as_ptr(),
-                out_of_range_len: range_pointers[i].len(),
-                hotkey: c_int::from(d.hotkey),
-            })
-            .collect();
-        let mut sink = Sink {
-            out: Vec::new(),
-            error: None,
-        };
-        let status = unsafe {
-            bsr_test_ini_mutations(
-                base.as_ptr().cast(),
-                base.len(),
-                read_keys.as_ptr(),
-                read_keys.len(),
-                mutation_keys.as_ptr(),
-                mutation_keys.len(),
-                emit,
-                error,
-                (&mut sink as *mut Sink).cast(),
-            )
-        };
-        assert_eq!(status, 0, "the corpus generator refused: {:?}", sink.error);
-        sink.out
-    }
-}
 
 /// Every key the frozen reader takes a value from, described for the corpus generator.
 fn descriptors() -> Vec<corpus::Descriptor> {
@@ -497,6 +390,278 @@ fn test_comparison_one_oracle_against_import(root: &Path, inputs: &[Input]) -> V
     failures
 }
 
+const CANONICAL: i32 = 0;
+const MIGRATED: i32 = 1;
+const CREATED: i32 = 2;
+const FILE_ATTRIBUTE_READONLY: u32 = 1;
+
+/// A file as the tests hold it to: its bytes, its last write time and its attributes.
+#[derive(Debug, PartialEq)]
+struct Stamp {
+    bytes: Vec<u8>,
+    written: std::time::SystemTime,
+    attributes: u32,
+}
+
+fn stamp(path: &Path) -> Stamp {
+    use std::os::windows::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).unwrap();
+    Stamp {
+        bytes: std::fs::read(path).unwrap(),
+        written: metadata.modified().unwrap(),
+        attributes: metadata.file_attributes(),
+    }
+}
+
+fn set_read_only(path: &Path, read_only: bool) {
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(read_only);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
+fn listing(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+fn mentions(lines: &[Line], text: &str) -> bool {
+    lines.iter().any(|line| match line {
+        Line::Info(l) | Line::Warning(l) => l.contains(text),
+    })
+}
+
+/// One migration, in a game folder of its own that holds the input as the legacy file, and
+/// what it left there.
+struct Migration {
+    dir: PathBuf,
+    config: PathBuf,
+    legacy: PathBuf,
+    legacy_before: Option<Stamp>,
+    status: i32,
+    settings: Settings,
+    log: Vec<Line>,
+    owner: Owner,
+}
+
+fn migrate(root: &Path, input: &Input, defaults: &Path, read_only: bool) -> Migration {
+    let dir = fresh_dir(root);
+    let legacy = place(&dir, input);
+    let legacy_before = input.bytes.as_ref().map(|_| {
+        if read_only {
+            set_read_only(&legacy, true);
+        }
+        stamp(&legacy)
+    });
+    let owner = Owner::at(&dir, defaults);
+    let (status, settings, log) = owner.load();
+    Migration {
+        config: dir.join("CameraUnlock.ini"),
+        dir,
+        legacy,
+        legacy_before,
+        status,
+        settings,
+        log,
+        owner,
+    }
+}
+
+fn committed() -> Vec<u8> {
+    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("config/CameraUnlock.ini")).unwrap()
+}
+
+/// Comparison 2, and everything the conversion promises about the files it leaves behind,
+/// over one Defaults.ini. `migrated` collects every distinct CameraUnlock.ini written.
+fn test_comparison_two_import_against_migration(
+    root: &Path,
+    inputs: &[Input],
+    defaults: &Path,
+    builtin: bool,
+    migrated: &mut BTreeSet<Vec<u8>>,
+) -> Vec<String> {
+    let over = if builtin {
+        "Defaults.ini at the built-in values"
+    } else {
+        "Defaults.ini changed"
+    };
+    let committed = committed();
+    let defaults_before = stamp(defaults);
+    let mut failures = Vec::new();
+    let mut check = |ok: bool, what: String| {
+        if !ok {
+            failures.push(what);
+        }
+    };
+    for input in inputs {
+        let n = format!("{} ({over})", input.name);
+        let i = read_import(root, input);
+        let m = migrate(root, input, defaults, false);
+        let g = from_migration(&m.settings, &m.owner);
+
+        let Some(legacy_before) = &m.legacy_before else {
+            // Not a migration: a fresh install, which follows Defaults.ini.
+            check(m.status == CREATED, format!("{n}: the file is created"));
+            check(
+                std::fs::read(&m.config).unwrap() == committed,
+                format!("{n}: the created file is the committed one"),
+            );
+            check(
+                listing(&m.dir) == ["CameraUnlock.ini"],
+                format!("{n}: the folder holds CameraUnlock.ini and nothing else"),
+            );
+            if builtin {
+                for d in differences(&i, &g) {
+                    check(false, format!("{n}: import/created {d}"));
+                }
+            }
+            continue;
+        };
+
+        for d in differences(&i, &g) {
+            check(false, format!("{n}: import/migration {d}"));
+        }
+        check(
+            &stamp(&m.legacy) == legacy_before,
+            format!("{n}: {LEGACY_NAME} is left exactly as it was"),
+        );
+        check(
+            stamp(defaults) == defaults_before,
+            format!("{n}: Defaults.ini is left exactly as it was"),
+        );
+        check(
+            m.status == MIGRATED,
+            format!(
+                "{n}: the file is imported, status {}: {:?}",
+                m.status, m.log
+            ),
+        );
+        if m.status != MIGRATED {
+            continue;
+        }
+        check(
+            listing(&m.dir) == ["CameraUnlock.ini", LEGACY_NAME],
+            format!("{n}: the folder holds CameraUnlock.ini and {LEGACY_NAME} and nothing else"),
+        );
+        check(
+            mentions(&m.log, "created from"),
+            format!("{n}: the log says where CameraUnlock.ini came from"),
+        );
+        let written = std::fs::read(&m.config).unwrap();
+        migrated.insert(written.clone());
+
+        // The next launch reads CameraUnlock.ini over the same Defaults.ini, to the same
+        // settings, does not import, and writes neither file.
+        let again = Owner::at(&m.dir, defaults);
+        let (status, settings, log) = again.load();
+        check(
+            status == CANONICAL,
+            format!("{n}: the next launch reads CameraUnlock.ini"),
+        );
+        check(
+            settings == m.settings
+                && support::render_loaded(&again) == support::render_loaded(&m.owner),
+            format!("{n}: the next launch runs on the same settings"),
+        );
+        check(
+            !mentions(&log, "created from"),
+            format!("{n}: the next launch does not import"),
+        );
+        check(
+            mentions(&log, "is left as it was and is not read"),
+            format!("{n}: the next launch says {LEGACY_NAME} is not read"),
+        );
+        check(
+            std::fs::read(&m.config).unwrap() == written,
+            format!("{n}: the next launch leaves CameraUnlock.ini as it was"),
+        );
+        check(
+            &stamp(&m.legacy) == legacy_before,
+            format!("{n}: the next launch leaves {LEGACY_NAME} as it was"),
+        );
+
+        // A read-only legacy file imports as a writable one does and stays read-only.
+        if builtin {
+            let r = migrate(root, input, defaults, true);
+            check(
+                r.status == m.status
+                    && support::render_loaded(&r.owner) == support::render_loaded(&m.owner)
+                    && std::fs::read(&r.config).unwrap() == written,
+                format!("{n}: a read-only {LEGACY_NAME} imports as a writable one does"),
+            );
+            let before = r.legacy_before.as_ref().unwrap();
+            check(
+                &stamp(&r.legacy) == before && before.attributes & FILE_ATTRIBUTE_READONLY != 0,
+                format!("{n}: a read-only {LEGACY_NAME} keeps its attribute, bytes and write time"),
+            );
+            set_read_only(&r.legacy, false);
+        }
+    }
+    failures
+}
+
+/// Every published build's first-run file imports into exactly the file a fresh install
+/// creates, with Defaults.ini at the built-in values.
+fn test_fresh_equals_upgrade(root: &Path, defaults: &Path) -> Vec<String> {
+    let committed = committed();
+    FIRST_RUNS
+        .iter()
+        .filter_map(|name| {
+            let input = Input {
+                name: name.to_string(),
+                bytes: Some(data(name)),
+            };
+            let m = migrate(root, &input, defaults, false);
+            (m.status != MIGRATED || std::fs::read(&m.config).unwrap() != committed).then(|| {
+                format!("{name} does not import into config/CameraUnlock.ini byte for byte")
+            })
+        })
+        .collect()
+}
+
+/// Defaults.ini as a player may have changed it, from the one the owner created: every value
+/// this game reads differs from the built-in one, the tracking mode pair naming rotation only.
+fn write_altered_defaults(builtin: &Path, altered: &Path) {
+    let mut text = String::from_utf8(std::fs::read(builtin).unwrap()).unwrap();
+    for (from, to) in [
+        ("UdpPort=4242", "UdpPort=5000"),
+        ("EnableOnStartup=true", "EnableOnStartup=false"),
+        ("WorldSpaceYaw=true", "WorldSpaceYaw=false"),
+        ("PositionEnabled=true", "PositionEnabled=false"),
+        ("LocalSmoothing=0.0", "LocalSmoothing=0.3"),
+        ("RemoteSmoothing=0.15", "RemoteSmoothing=0.5"),
+        ("ToggleKey=End, Ctrl+Shift+Y", "ToggleKey=F8"),
+        (
+            "CycleTrackingModeKey=PageUp, Ctrl+Shift+G",
+            "CycleTrackingModeKey=F9",
+        ),
+        ("YawModeKey=PageDown, Ctrl+Shift+H", "YawModeKey=F10"),
+    ] {
+        let line = format!("\r\n{from}\r\n");
+        assert!(
+            text.contains(&line),
+            "the created Defaults.ini has no line {from}"
+        );
+        text = text.replacen(&line, &format!("\r\n{to}\r\n"), 1);
+    }
+    std::fs::create_dir_all(altered.parent().unwrap()).unwrap();
+    std::fs::write(altered, text).unwrap();
+}
+
+/// Each distinct migrated file, for lint-migrated.mjs.
+fn write_migrated_files(migrated: &BTreeSet<Vec<u8>>) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/config-differential-migrated");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (n, file) in migrated.iter().enumerate() {
+        std::fs::write(dir.join(format!("{n}.ini")), file).unwrap();
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 3 && args[1] == "--oracle" {
@@ -508,17 +673,42 @@ fn main() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
 
+    // The owner creates Defaults.ini here at the built-in values on the first load, in a
+    // CameraUnlock folder whose parent has to exist.
+    let builtin_defaults = root.join("user-builtin/CameraUnlock/Defaults.ini");
+    let altered_defaults = root.join("user-altered/CameraUnlock/Defaults.ini");
+    std::fs::create_dir_all(root.join("user-builtin")).unwrap();
+
     let inputs = inputs();
     let mut failures = test_the_committed_first_run_is_the_oracles(&root);
+    failures.extend(test_fresh_equals_upgrade(&root, &builtin_defaults));
+    write_altered_defaults(&builtin_defaults, &altered_defaults);
     failures.extend(test_comparison_one_oracle_against_import(&root, &inputs));
+    let mut migrated = BTreeSet::new();
+    failures.extend(test_comparison_two_import_against_migration(
+        &root,
+        &inputs,
+        &builtin_defaults,
+        true,
+        &mut migrated,
+    ));
+    failures.extend(test_comparison_two_import_against_migration(
+        &root,
+        &inputs,
+        &altered_defaults,
+        false,
+        &mut migrated,
+    ));
+    write_migrated_files(&migrated);
 
     std::fs::remove_dir_all(&root).unwrap();
     for f in failures.iter().take(200) {
         println!("FAIL {f}");
     }
     println!(
-        "{} inputs; comparison 1 finds no difference from v0.5.0: {}",
+        "{} inputs, {} distinct migrated files; comparisons 1 and 2 find no difference: {}",
         inputs.len(),
+        migrated.len(),
         failures.is_empty()
     );
     assert!(failures.is_empty(), "{} failures", failures.len());

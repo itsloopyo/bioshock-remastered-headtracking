@@ -8,6 +8,9 @@
 
 #include "cameraunlock/config/legacy_import.h"
 #include "cameraunlock/config/testing/ini_mutations.h"
+#include "cameraunlock/input/key_bindings.h"
+
+#include "config_owner.h"
 
 extern "C" {
 
@@ -56,6 +59,60 @@ int bsr_test_ini_mutations(const char* base, std::size_t base_len, const BsrLega
         const std::string what = e.what();
         error(context, what.data(), what.size());
         return 1;
+    }
+}
+
+// The mod's owner over the Defaults.ini at `defaults`, a scratch file, so no test reads or
+// creates the player's own. Null after an exception, whose text goes to `text`.
+BsrConfigOwner* bsr_test_config_owner_new_at(const wchar_t* folder, std::size_t folder_len, const wchar_t* defaults,
+                                             std::size_t defaults_len, BsrLegacyReader reader, BsrText text,
+                                             void* context) {
+    try {
+        return new BsrConfigOwner(BioShockRemasteredHeadTracking::ConfigOptions(
+            std::wstring(folder, folder_len),
+            cameraunlock::config::DefaultsFile::At(std::wstring(defaults, defaults_len)), reader));
+    } catch (const std::exception& e) {
+        const std::string what = e.what();
+        text(context, 2, what.data(), what.size());
+        return nullptr;
+    }
+}
+
+// The file the owner creates where there is none, and the committed file.
+void bsr_test_render_fresh(BsrEmitText emit, void* context) {
+    const std::string bytes = cameraunlock::config::RenderCanonicalFresh(BioShockRemasteredHeadTracking::ConfigTable(),
+                                                                         BioShockRemasteredHeadTracking::ConfigHeader());
+    emit(context, bytes.data(), bytes.size());
+}
+
+// Every setting the owner's last Load gave, written as the renderer writes each, so two loads
+// compare whole.
+void bsr_test_render_loaded(const BsrConfigOwner* owner, BsrEmitText emit, void* context) {
+    const std::string bytes = cameraunlock::config::RenderCanonical(BioShockRemasteredHeadTracking::ConfigTable(),
+                                                                    owner->loaded,
+                                                                    BioShockRemasteredHeadTracking::ConfigHeader());
+    emit(context, bytes.data(), bytes.size());
+}
+
+typedef void (*BsrEmitBinding)(void* context, std::uint32_t modifiers, std::int32_t vk);
+
+// The bindings the mod registers for one list of the last Load: 0 ToggleKey, 1
+// CycleTrackingModeKey, 2 YawModeKey. Returns 0, or 1 when the list does not parse.
+int bsr_test_hotkey_bindings(const BsrConfigOwner* owner, int which, BsrEmitBinding emit, void* context) {
+    const BioShockRemasteredHeadTracking::Config& c = owner->loaded;
+    const std::string& list = which == 0 ? c.toggle_key : which == 1 ? c.cycle_tracking_mode_key : c.yaw_mode_key;
+    const cameraunlock::input::KeyBindingsParseResult parsed = cameraunlock::input::ParseKeyBindings(list);
+    if (!parsed.ok()) return 1;
+    for (const cameraunlock::input::KeyBinding& b : parsed.bindings) {
+        emit(context, static_cast<std::uint32_t>(b.modifiers), b.vk);
+    }
+    return 0;
+}
+
+// The keys the import names, section and key per emit.
+void bsr_test_import_keys(BsrEmitPair emit, void* context) {
+    for (const cameraunlock::config::LegacyKey& k : BioShockRemasteredHeadTracking::ConfigLegacyImport(nullptr).keys) {
+        emit(context, k.section.data(), k.section.size(), k.key.data(), k.key.size());
     }
 }
 
