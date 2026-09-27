@@ -2,14 +2,7 @@
 
 ![BioShock Remastered running with this mod](https://raw.githubusercontent.com/itsloopyo/bioshock-remastered-headtracking/main/assets/readme-clip.gif)
 
-<sub>Gameplay footage of BioShock Remastered, (c) 2K Games / Irrational Games /
-Blind Squirrel Entertainment, shown to demonstrate what the mod does.</sub>
-
 An unofficial head tracking mod for BioShock Remastered that moves the view with your head while your mouse or controller keeps aiming, driven by a webcam, phone, or any OpenTrack compatible tracker, with no VR headset required.
-
-> **Updating from 0.5.0 or earlier:** settings now live in `Build\Final\CameraUnlock.ini`.
-> The first start of this version copies your settings from `bioshock_headtrack.ini` into it
-> and leaves `bioshock_headtrack.ini` as it was. See [Configuration](#configuration).
 
 ## Features
 
@@ -17,7 +10,6 @@ An unofficial head tracking mod for BioShock Remastered that moves the view with
   mouse or controller keeps aiming.
 - **6DOF tracking** - yaw, pitch and roll plus positional lean, peek and duck.
 - **Works with any OpenTrack compatible tracker** - free options available for PC, iOS and Android
-- **Native reticles** - BioShock's own reticles move with the aim point.
 
 ## Requirements
 
@@ -268,8 +260,8 @@ there is pure added latency.
 
 ### Field of view
 
-The mod reads the game's world and weapon projection matrices. Use the in-game
-FOV setting; the old `[overlay] fov_h` override is no longer used.
+The mod reads the game's world and weapon projection matrices, so use the
+in-game FOV setting.
 
 ## Troubleshooting
 
