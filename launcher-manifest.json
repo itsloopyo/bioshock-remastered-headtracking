@@ -12,6 +12,14 @@
     { "source": "plugins/xinput1_3.dll", "target": "Build/Final/xinput1_3.dll", "backup": true }
   ],
 
+  "config": {
+    "path": "Build/Final/CameraUnlock.ini",
+    "anchor": "game_root",
+    "legacy_source": "Build/Final/bioshock_headtrack.ini",
+    "canonical_since": "0.6.0",
+    "per_game": {}
+  },
+
   "runtime_requirements": [],
   "dependencies": []
 }
