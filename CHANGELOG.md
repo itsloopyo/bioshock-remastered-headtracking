@@ -5,12 +5,13 @@
 ### Changed
 
 - Settings move to `Build\Final\CameraUnlock.ini`. Earlier versions of the mod kept these settings in `bioshock_headtrack.ini`, in the same folder. The first time this version starts and finds no `CameraUnlock.ini`, it reads your settings from `bioshock_headtrack.ini` and writes them into `CameraUnlock.ini`. It never changes `bioshock_headtrack.ini`, and does not read it again while `CameraUnlock.ini` exists.
-- A setting that the defaults the README shows set to `default` is written as `default` when the value imported for it equals its default at that start, which is the value `Defaults.ini` gives it, or the built-in value where `Defaults.ini` gives none. It then follows `Defaults.ini`. Every other setting is written with the value imported for it.
+- A setting that the defaults the README shows set to `default` is written as `default` when you never changed it from the default earlier versions used, because `bioshock_headtrack.ini` does not hold it or holds that default. It then follows `Defaults.ini`, so it takes the value `Defaults.ini` gives it, or the built-in value where `Defaults.ini` gives none, which can differ from the default earlier versions used. A setting you changed is written with the value imported for it, or as `default` where that value equals its default at that start.
 - `RotationEnabled` and `PositionEnabled` are one setting here, the tracking mode, so both are written as `default` or neither is.
 - Comments, and keys the mod never read, are not carried over. Nor are these, where your old file had them:
   - A sensitivity, scale, deadzone, response curve or axis inversion you changed from its default. Set these in your tracker instead.
   - Reticle settings, and a key that toggled the reticle.
   - The setting for a feature that earlier versions shipped switched off while it was untested. It now follows the mod's default.
+  - A hotkey set to Ctrl, Shift or Alt on its own. That key goes down before the key of any chord made with it, so the hotkey is left unbound, and it keeps its Ctrl+Shift chord where it has one.
 - An older version of the mod reads `bioshock_headtrack.ini` and never reads `CameraUnlock.ini`, so a setting you change after updating is not in `bioshock_headtrack.ini`.
 - Deleting only `CameraUnlock.ini` makes the next start read `bioshock_headtrack.ini` again. To go back to the defaults, replace everything in `CameraUnlock.ini` with the defaults the README shows. Every setting they set to `default` then follows `Defaults.ini`.
 - A `bioshock_headtrack.ini` that is not UTF-8 text is not imported. That start runs on the defaults, as earlier versions did with such a file, saves nothing and says why in the log, and the next start tries again, so saving the file as UTF-8 imports it. Earlier versions wrote their defaults over such a file.

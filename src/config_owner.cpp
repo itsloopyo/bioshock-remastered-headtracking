@@ -15,32 +15,53 @@ namespace BioShockRemasteredHeadTracking {
 
 namespace {
 
+using cameraunlock::config::DroppedValue;
 using cameraunlock::config::ImportResult;
+using cameraunlock::config::LegacyFollowsDefaultsIni;
 using cameraunlock::config::LegacyInput;
-using cameraunlock::input::KeyBinding;
-using cameraunlock::input::KeyModifiers;
+using C = cameraunlock::config::schema::Concept;
 
 constexpr std::int32_t kLegacyRead = 0;
 constexpr std::int32_t kLegacyNoFile = 1;
 constexpr std::int32_t kLegacyUnread = 2;
 
+// v0.5.0's defaults, which the bioshock_headtrack.ini it shipped repeats for the smoothing.
+constexpr bool kShippedWorldSpaceYaw = true;
+constexpr std::int32_t kShippedYawModeKey = 0x22;
+constexpr double kShippedLocalSmoothing = 0.0;
+constexpr double kShippedRemoteSmoothing = 0.15;
+
 // Everything v0.5.0 did not read from the file stays at its default: it always started with
 // tracking on and both axes on, on port 4242, with End or Ctrl+Shift+Y and PageUp or
 // Ctrl+Shift+G, and always held a lean off the walls at LeanClampSettings' default release,
-// which are the defaults here too. Its yaw key always fired on Ctrl+Shift+H as well, and the
-// frozen reader only hands back a code from 0x01 to 0xFE.
-void MapLegacy(const BsrLegacyConfig& c, Config& out) {
+// which are the defaults here too, and those rows follow Defaults.ini. Its yaw key always fired
+// on Ctrl+Shift+H as well, and the frozen reader only hands back a code from 0x01 to 0xFE.
+LegacyFollowsDefaultsIni MapLegacy(const BsrLegacyConfig& c, Config& out, std::vector<DroppedValue>& dropped) {
     out.world_space_yaw = c.world_space_yaw != 0;
-    out.yaw_mode_key = cameraunlock::input::FormatKeyBindings(
-        {KeyBinding{KeyModifiers::kNone, c.yaw_mode_key}, KeyBinding{KeyModifiers::kCtrl | KeyModifiers::kShift, 'H'}});
+    const std::string yaw_key =
+        cameraunlock::config::LegacyVirtualKeyToBindings(c.yaw_mode_key, "Hotkeys", "YawModeKey", dropped);
+    out.yaw_mode_key = yaw_key.empty() ? "Ctrl+Shift+H" : yaw_key + ", Ctrl+Shift+H";
     out.local_smoothing = c.local_smoothing;
     out.remote_smoothing = c.remote_smoothing;
+
+    LegacyFollowsDefaultsIni follows;
+    follows.NotInLegacy(C::UdpPort);
+    follows.NotInLegacy(C::EnableOnStartup);
+    follows.Setting(C::WorldSpaceYaw, out.world_space_yaw, kShippedWorldSpaceYaw);
+    follows.TrackingMode(true);
+    follows.Setting(C::LocalSmoothing, c.local_smoothing, kShippedLocalSmoothing);
+    follows.Setting(C::RemoteSmoothing, c.remote_smoothing, kShippedRemoteSmoothing);
+    follows.NotInLegacy(C::CollisionEnabled);
+    follows.NotInLegacy(C::CollisionReleaseSmoothing);
+    follows.NotInLegacy(C::ToggleKey);
+    follows.NotInLegacy(C::CycleTrackingModeKey);
+    follows.Setting(C::YawModeKey, c.yaw_mode_key, kShippedYawModeKey);
+    return follows;
 }
 
 }  // namespace
 
 cameraunlock::config::ConfigTable<Config> ConfigTable() {
-    using C = cameraunlock::config::schema::Concept;
     cameraunlock::config::ConfigTable<Config> table{Config{}};
     table.Concept<C::UdpPort>(&Config::udp_port)
         .Concept<C::EnableOnStartup>(&Config::enable_on_startup)
@@ -71,12 +92,13 @@ cameraunlock::config::LegacyImport<Config> ConfigLegacyImport(BsrLegacyReader re
     import.run = [reader](const LegacyInput& input, Config& out) {
         BsrLegacyConfig read{};
         reader(input.path.data(), input.path.size(), &read);
-        MapLegacy(read, out);
+        std::vector<DroppedValue> dropped;
+        const LegacyFollowsDefaultsIni follows = MapLegacy(read, out, dropped);
         switch (read.outcome) {
             case kLegacyRead:
-                return ImportResult::Imported({});
+                return ImportResult::Imported(std::move(dropped), {}, follows.Concepts());
             case kLegacyNoFile:
-                return ImportResult::Absent({});
+                return ImportResult::Absent(std::move(dropped), {}, follows.Concepts());
             case kLegacyUnread:
                 // v0.5.0 wrote its template over such a file and ran on the defaults. The
                 // session runs on the same defaults, and the file is left for the player to fix

@@ -22,11 +22,13 @@
 //!
 //! Comparison 1, oracle against import, finds nothing: no commit since v0.5.0 changed how the
 //! file is read. Comparison 2, import against migration, finds one change, listed in
-//! KNOWN_CHANGES with its commit: how the hotkeys fire, which moved to core's poller. Otherwise
-//! no approved change or normalisation in core's data/config-format.json applies to what
-//! v0.5.0 read. It runs over a Defaults.ini at the built-in values and over one a player
-//! changed, since the migration writes default exactly where the imported value equals what
-//! Defaults.ini gives.
+//! KNOWN_CHANGES with its commit: how the hotkeys fire, which moved to core's poller. Beyond
+//! that it allows what core's rules give: every row the player never changed from v0.5.0's
+//! shipped value, and every row v0.5.0 had no setting for, follows Defaults.ini and starts on
+//! what a fresh install over the same Defaults.ini starts on, and a yaw key on a Ctrl, Shift or
+//! Alt key alone imports as unbound (N3) beside Ctrl+Shift+H, with the drop in the log. It runs
+//! over a Defaults.ini at the built-in values and over one a player changed, where every such
+//! row shows it.
 //!
 //! The distinct migrated files go to target/config-differential-migrated, where
 //! lint-migrated.mjs runs core's canonical config lint over them after this binary.
@@ -402,9 +404,47 @@ fn from_import(c: &legacy_config::Config) -> Effective {
     )
 }
 
-fn read_import(root: &Path, input: &Input) -> Effective {
+fn read_import(root: &Path, input: &Input) -> (legacy_config::Config, Effective) {
     let dir = fresh_dir(root);
-    from_import(&import_config(&place(&dir, input)))
+    let c = import_config(&place(&dir, input));
+    let i = from_import(&c);
+    (c, i)
+}
+
+/// A Ctrl, Shift or Alt key, which core's N3 unbinds.
+fn modifier_key(code: i32) -> bool {
+    (0x10..=0x12).contains(&code) || (0xA0..=0xA5).contains(&code)
+}
+
+/// What the migration starts on: the import, with each row the player never changed from
+/// v0.5.0's shipped value, and each row v0.5.0 had no setting for, at what `fresh`, a fresh
+/// install over the same Defaults.ini, starts on, and a yaw key on a modifier alone unbound.
+fn expected_migration(c: &legacy_config::Config, i: &Effective, fresh: &Effective) -> Effective {
+    let shipped = legacy_config::Config::default();
+    let mut e = i.clone();
+    e.enable_on_startup = fresh.enable_on_startup;
+    e.udp_port = fresh.udp_port;
+    e.rotation_enabled = fresh.rotation_enabled;
+    e.position_enabled = fresh.position_enabled;
+    e.collision_enabled = fresh.collision_enabled;
+    e.collision_release_smoothing_bits = fresh.collision_release_smoothing_bits;
+    e.toggle = fresh.toggle.clone();
+    e.cycle_mode = fresh.cycle_mode.clone();
+    if c.world_space_yaw == shipped.world_space_yaw {
+        e.world_space_yaw = fresh.world_space_yaw;
+    }
+    if c.local_smoothing == shipped.local_smoothing {
+        e.local_smoothing_bits = fresh.local_smoothing_bits;
+    }
+    if c.remote_smoothing == shipped.remote_smoothing {
+        e.remote_smoothing_bits = fresh.remote_smoothing_bits;
+    }
+    if c.yaw_mode_key == shipped.yaw_mode_key {
+        e.yaw_mode = fresh.yaw_mode.clone();
+    } else if modifier_key(c.yaw_mode_key) {
+        e.yaw_mode = vec![(CTRL_SHIFT, 'H' as i32)];
+    }
+    e
 }
 
 // ---- the inputs -----------------------------------------------------------------------------
@@ -551,7 +591,7 @@ fn test_comparison_one_oracle_against_import(root: &Path, inputs: &[Input]) -> V
     let mut failures = Vec::new();
     for input in inputs {
         let o = read_oracle(root, input);
-        let i = read_import(root, input);
+        let (_, i) = read_import(root, input);
         for (field, d) in differences(&o, &i) {
             failures.push(format!("{}: oracle/import {field} {d}", input.name));
         }
@@ -662,6 +702,14 @@ fn test_comparison_two_import_against_migration(
     };
     let committed = committed();
     let defaults_before = stamp(defaults);
+    let fresh = {
+        let input = Input {
+            name: "no file".into(),
+            bytes: None,
+        };
+        let m = migrate(root, &input, defaults, false);
+        from_migration(&m.settings, &m.owner)
+    };
     let mut failures = Vec::new();
     let mut check = |ok: bool, what: String| {
         if !ok {
@@ -670,7 +718,7 @@ fn test_comparison_two_import_against_migration(
     };
     for input in inputs {
         let n = format!("{} ({over})", input.name);
-        let i = read_import(root, input);
+        let (c, i) = read_import(root, input);
         let m = migrate(root, input, defaults, false);
         let g = from_migration(&m.settings, &m.owner);
 
@@ -697,7 +745,14 @@ fn test_comparison_two_import_against_migration(
             continue;
         };
 
-        for (field, d) in differences(&i, &g) {
+        // A file the frozen reader cannot read defers the import, and the session runs on
+        // v0.5.0's defaults, as v0.5.0 did.
+        let expected = if unreadable(&m.legacy) {
+            i.clone()
+        } else {
+            expected_migration(&c, &i, &fresh)
+        };
+        for (field, d) in differences(&expected, &g) {
             if KNOWN_CHANGES.iter().any(|(k, _)| *k == field) {
                 known.insert(field);
             } else {
@@ -760,6 +815,19 @@ fn test_comparison_two_import_against_migration(
             mentions(&m.log, "created from"),
             format!("{n}: the log says where CameraUnlock.ini came from"),
         );
+        if c.yaw_mode_key != legacy_config::Config::default().yaw_mode_key
+            && modifier_key(c.yaw_mode_key)
+        {
+            check(
+                m.log.iter().any(|line| match line {
+                    Line::Info(l) | Line::Warning(l) => {
+                        l.contains("[Hotkeys] YawModeKey=")
+                            && l.contains("it is a Ctrl, Shift or Alt key")
+                    }
+                }),
+                format!("{n}: the log says the yaw key on a modifier alone is unbound"),
+            );
+        }
         let written = std::fs::read(&m.config).unwrap();
         migrated.insert(written.clone());
 
@@ -813,23 +881,34 @@ fn test_comparison_two_import_against_migration(
     failures
 }
 
-/// Every published build's first-run file imports into exactly the file a fresh install
-/// creates, with Defaults.ini at the built-in values.
+/// Every published build's first-run file, and an empty file, holds no setting the player
+/// changed, so each imports into exactly the file a fresh install creates, every row default,
+/// whatever Defaults.ini holds.
 fn test_fresh_equals_upgrade(root: &Path, defaults: &Path) -> Vec<String> {
     let committed = committed();
-    FIRST_RUNS
+    let mut inputs: Vec<Input> = FIRST_RUNS
         .iter()
-        .filter_map(|name| {
-            let input = Input {
-                name: name.to_string(),
-                bytes: Some(data(name)),
-            };
-            let m = migrate(root, &input, defaults, false);
-            (m.status != MIGRATED || std::fs::read(&m.config).unwrap() != committed).then(|| {
-                format!("{name} does not import into config/CameraUnlock.ini byte for byte")
-            })
+        .map(|name| Input {
+            name: name.to_string(),
+            bytes: Some(data(name)),
         })
-        .collect()
+        .collect();
+    inputs.push(Input {
+        name: "empty file".into(),
+        bytes: Some(Vec::new()),
+    });
+    let mut failures = Vec::new();
+    for input in &inputs {
+        let m = migrate(root, input, defaults, false);
+        if m.status != MIGRATED || std::fs::read(&m.config).unwrap() != committed {
+            failures.push(format!(
+                "{} over {} does not import into config/CameraUnlock.ini byte for byte",
+                input.name,
+                defaults.display()
+            ));
+        }
+    }
+    failures
 }
 
 /// Defaults.ini as a player may have changed it, from the one the owner created: every value
@@ -896,8 +975,10 @@ fn main() {
     let inputs = inputs();
     let mut failures = test_the_v050_hotkeys_are_its_source();
     failures.extend(test_the_committed_first_run_is_the_oracles(&root));
+    // The first load creates the built-in Defaults.ini that the altered one is made from.
     failures.extend(test_fresh_equals_upgrade(&root, &builtin_defaults));
     write_altered_defaults(&builtin_defaults, &altered_defaults);
+    failures.extend(test_fresh_equals_upgrade(&root, &altered_defaults));
     failures.extend(test_comparison_one_oracle_against_import(&root, &inputs));
     let mut migrated = BTreeSet::new();
     let mut known = BTreeSet::new();
