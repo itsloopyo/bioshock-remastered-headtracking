@@ -76,57 +76,6 @@ function Set-CargoVersion {
     Set-Content -Path $cargoPath -Value $content -NoNewline
 }
 
-# Mirrors New-ChangelogFromCommits' insertion so a -Force maintenance entry
-# lands in the same place with the same shape.
-function Add-MaintenanceChangelogEntry {
-    param([string]$Path, [string]$NewVersion)
-    $date = Get-Date -Format 'yyyy-MM-dd'
-    $entry = "## [$NewVersion] - $date`n`n### Changed`n`n- Maintenance release (no user-facing changes).`n`n"
-    $changelog = Get-Content $Path -Raw
-    if ($changelog -match '(?s)(# Changelog.*?)(## \[)') {
-        $changelog = $changelog -replace '(?s)(# Changelog.*?\n\n)', "`$1$entry"
-    } else {
-        $changelog = $changelog -replace '(?s)(# Changelog.*?\n)', "`$1$entry"
-    }
-    $changelog = $changelog.TrimEnd() + "`n"
-    Set-Content $Path $changelog -NoNewline
-}
-
-# New-ChangelogFromCommits lists commit subjects and never reads [Unreleased], so
-# the notes written there by hand would stay behind under the new entry, reading
-# as older than it. They open the new entry instead, merged heading by heading.
-function Move-UnreleasedIntoEntry {
-    param([string]$Path, [string]$NewVersion)
-    $text = [System.IO.File]::ReadAllText($Path)
-    $unreleased = [regex]::Match($text, '(?ms)^## \[Unreleased\][^\n]*\n(.*?)(?=^## \[|\z)')
-    if (-not $unreleased.Success) { return }
-    $text = $text.Remove($unreleased.Index, $unreleased.Length)
-    $entry = [regex]::Match($text, "(?ms)^(## \[$([regex]::Escape($NewVersion))\][^\n]*\n)(.*?)(?=^## \[|\z)")
-    if (-not $entry.Success) { throw "CHANGELOG.md has no [$NewVersion] entry to move [Unreleased] into." }
-    $order = New-Object System.Collections.Generic.List[string]
-    $sections = @{}
-    foreach ($body in @($unreleased.Groups[1].Value, $entry.Groups[2].Value)) {
-        if (($body -split '(?m)^### ', 2)[0].Trim()) {
-            throw "CHANGELOG.md has text outside a ### heading in [Unreleased] or [$NewVersion]; put it under one."
-        }
-        foreach ($block in [regex]::Matches($body, '(?ms)^### ([^\n]+)\n(.*?)(?=^### |\z)')) {
-            $heading = $block.Groups[1].Value.Trim()
-            if (-not $sections.ContainsKey($heading)) {
-                $order.Add($heading)
-                $sections[$heading] = @()
-            }
-            $content = $block.Groups[2].Value.Trim()
-            if ($content) { $sections[$heading] += $content }
-        }
-    }
-    $merged = $entry.Groups[1].Value + "`n"
-    foreach ($heading in $order) {
-        $merged += "### $heading`n`n" + ($sections[$heading] -join "`n") + "`n`n"
-    }
-    $text = $text.Remove($entry.Index, $entry.Length).Insert($entry.Index, $merged)
-    [System.IO.File]::WriteAllText($Path, $text.TrimEnd() + "`n", (New-Object System.Text.UTF8Encoding($false)))
-}
-
 Write-Host ''
 Write-Host '=== BioShock Remastered Head Tracking Release ===' -ForegroundColor Cyan
 Write-Host ''
@@ -178,32 +127,20 @@ Write-Host ''
 # any version files so an abort here leaves the working tree clean instead
 # of stranding a half-applied version bump with no tag.
 Write-Host 'Generating CHANGELOG from commits...' -ForegroundColor Cyan
-$hasTags = git tag -l 2>$null
-if (-not $hasTags) {
-    $date = Get-Date -Format 'yyyy-MM-dd'
-    Set-Content $changelogPath "# Changelog`n`n## [$Version] - $date`n`nFirst release.`n"
-} else {
-    try {
-        $changelogArgs = @{
-            ChangelogPath = $changelogPath
-            Version       = $Version
-            ArtifactPaths = @('src/', 'cameraunlock-core', 'scripts/')
-        }
-        New-ChangelogFromCommits @changelogArgs
-    } catch {
-        if (-not $Force) {
-            Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host 'No user-facing changes to release. Re-run with -Force for a maintenance release.' -ForegroundColor Yellow
-            exit 1
-        }
-        if ([System.IO.File]::ReadAllText($changelogPath) -match '(?m)^## \[Unreleased\]') {
-            Write-Host 'Error: CHANGELOG.md has an [Unreleased] section, so this is not a maintenance release.' -ForegroundColor Red
-            exit 1
-        }
-        Write-Host 'No user-facing commits since last tag - writing maintenance entry (-Force).' -ForegroundColor Yellow
-        Add-MaintenanceChangelogEntry -Path $changelogPath -NewVersion $Version
+try {
+    $changelogArgs = @{
+        ChangelogPath = $changelogPath
+        Version       = $Version
+        ArtifactPaths = @('src/', 'cameraunlock-core', 'scripts/')
+        Maintenance   = [bool]$Force
     }
-    Move-UnreleasedIntoEntry -Path $changelogPath -NewVersion $Version
+    New-ChangelogFromCommits @changelogArgs
+} catch {
+    Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+    if (-not $Force) {
+        Write-Host 'No user-facing changes to release. Re-run with -Force for a maintenance release.' -ForegroundColor Yellow
+    }
+    exit 1
 }
 
 # Step 2 - bump version in Cargo.toml + install.cmd
