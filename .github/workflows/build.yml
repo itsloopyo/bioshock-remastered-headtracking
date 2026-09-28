@@ -4,15 +4,22 @@ on:
   push:
     branches: ['**']
     paths-ignore:
-      - '*.md'
-      - 'LICENSE'
+      - '**.md'
       - 'docs/**'
+      - 'LICENSE'
   pull_request:
     branches: [main]
     paths-ignore:
-      - '*.md'
-      - 'LICENSE'
+      - '**.md'
       - 'docs/**'
+      - 'LICENSE'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:

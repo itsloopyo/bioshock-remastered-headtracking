@@ -16,13 +16,13 @@ clean = "cargo clean"
 # Tests + clippy MUST also build for i686 - the engine hook uses
 # `extern "thiscall"`, which is only supported on x86 targets and
 # fails to compile on 64-bit hosts.
-test = { depends-on = ["test-config-lint", "test-vectors"] }
-# The unit tests, and the config differential test (tests/config_differential), which
-# reaches core through the test-support feature.
-test-unit = "cargo test --target i686-pc-windows-msvc --features test-support"
-# core's canonical config lint over config/CameraUnlock.ini and every CameraUnlock.ini the
-# differential test migrated.
-test-config-lint = { cmd = "node tests/config_differential/lint-migrated.mjs target/config-differential-migrated", depends-on = ["test-unit"] }
+# The unit tests and the pipeline vectors.
+test-unit = { cmd = "cargo test --target i686-pc-windows-msvc --features test-support --lib --test config_owner", depends-on = ["test-vectors"] }
+# The config differential test (tests/config_differential), which reaches core through the
+# test-support feature, then core's canonical config lint over config/CameraUnlock.ini and
+# every CameraUnlock.ini it migrated.
+test-differential = "cargo test --target i686-pc-windows-msvc --features test-support --test config_differential && node tests/config_differential/lint-migrated.mjs target/config-differential-migrated"
+test = { depends-on = ["test-unit", "test-differential"] }
 # Rewrite config/CameraUnlock.ini, the committed copy of the file the mod creates at first
 # launch, from the config table after a change to a row, a comment or a default; the render
 # test fails on the old file until this runs. encode-seed then rewrites the per_game of
@@ -48,7 +48,7 @@ bench-quick = "cargo bench -- --quick"
 install = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Configuration Debug", depends-on = ["build"] }
 install-release = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Configuration Release", depends-on = ["build-release"] }
 validate-release = "powershell -ExecutionPolicy Bypass -File scripts/validate-release.ps1"
-package = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/package.ps1", depends-on = ["build-release", "test"] }
+package = { cmd = "powershell -ExecutionPolicy Bypass -File scripts/package.ps1", depends-on = ["build-release", "test-unit"] }
 # Validates this repo's newest release ZIP against the launcher manifest rules.
 validate-manifest = "node cameraunlock-core/scripts/validate-manifest.mjs"
 release = "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
