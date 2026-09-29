@@ -117,15 +117,6 @@ pub struct TrackingState {
     /// Master enable flag (ToggleKey).
     pub enabled: bool,
 
-    /// Current yaw rotation from OpenTrack (degrees) - LEGACY, use atomic_rotation
-    pub yaw: f64,
-
-    /// Current pitch rotation from OpenTrack (degrees) - LEGACY, use atomic_rotation
-    pub pitch: f64,
-
-    /// Current roll rotation from OpenTrack (degrees) - LEGACY, use atomic_rotation
-    pub roll: f64,
-
     /// Rotational-tracking flag, cycled by CycleTrackingModeKey
     /// alongside `position_enabled`.
     pub rotation_enabled: bool,
@@ -180,9 +171,6 @@ impl Default for TrackingState {
     fn default() -> Self {
         Self {
             enabled: true,
-            yaw: 0.0,
-            pitch: 0.0,
-            roll: 0.0,
             rotation_enabled: true,
             position_enabled: true,
             // Start active - state detector defaults to Gameplay
@@ -386,12 +374,6 @@ pub fn is_position_enabled_atomic() -> bool {
 /// # Usage
 ///
 /// ```rust,ignore
-/// // Reading state (in render hook)
-/// let (yaw, pitch, roll) = {
-///     let state = GLOBAL_STATE.read();
-///     (state.yaw, state.pitch, state.roll)
-/// };
-///
 /// // Modifying state (in hotkey handler)
 /// {
 ///     let mut state = GLOBAL_STATE.write();
@@ -409,23 +391,6 @@ mod tests {
     fn test_default_enabled_true() {
         let state = TrackingState::default();
         assert!(state.enabled, "Default state should have enabled=true");
-    }
-
-    #[test]
-    fn test_default_rotations_zero() {
-        let state = TrackingState::default();
-        assert!(
-            (state.yaw - 0.0).abs() < f64::EPSILON,
-            "Default yaw should be 0"
-        );
-        assert!(
-            (state.pitch - 0.0).abs() < f64::EPSILON,
-            "Default pitch should be 0"
-        );
-        assert!(
-            (state.roll - 0.0).abs() < f64::EPSILON,
-            "Default roll should be 0"
-        );
     }
 
     #[test]
@@ -466,26 +431,6 @@ mod tests {
         state.toggle(); // Should log "Head tracking disabled"
         state.toggle(); // Should log "Head tracking enabled"
                         // No assertions needed - just verifying no panics
-    }
-
-    #[test]
-    fn test_global_state_thread_safety() {
-        // Verify we can read and write from the global state
-        {
-            let mut state = GLOBAL_STATE.write();
-            state.yaw = 42.0;
-        }
-
-        {
-            let state = GLOBAL_STATE.read();
-            assert!((state.yaw - 42.0).abs() < 0.0001);
-        }
-
-        // Reset for other tests
-        {
-            let mut state = GLOBAL_STATE.write();
-            state.yaw = 0.0;
-        }
     }
 
     #[test]

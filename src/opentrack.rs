@@ -42,8 +42,13 @@ const RECEIVE_BUFFER_SIZE: usize = 64;
 /// arrives there is no connection to smooth.
 static IS_REMOTE_CONNECTION: AtomicBool = AtomicBool::new(false);
 
-/// Socket read timeout in milliseconds (4ms allows ~250Hz polling)
-const READ_TIMEOUT_MS: u64 = 4;
+/// A datagram wakes the receive at once, so this only bounds how late the loop sees
+/// `shutdown_requested`. A short one would wake an idle receiver hundreds of times a second.
+const READ_TIMEOUT_MS: u64 = 100;
+
+/// Pause after a receive error that is not a timeout, so an error that returns at once on
+/// every call cannot spin the thread on a core.
+const RECEIVE_ERROR_BACKOFF_MS: u64 = 50;
 
 /// Bind retry cadence when the port is held by another process. Mirrors
 /// `OpenTrackReceiver` in cameraunlock-core/csharp so users get the same
@@ -284,11 +289,12 @@ fn receive_loop(socket: UdpSocket) {
 
         match socket.recv_from(&mut buf) {
             Ok((size, sender)) if size >= PACKET_SIZE => {
-                IS_REMOTE_CONNECTION.store(is_remote_address(&sender), Ordering::Release);
-
+                // Only an accepted datagram may pick the smoothing: a malformed one from
+                // any LAN host would otherwise switch a local tracker to RemoteSmoothing.
                 let Some(data) = decode_datagram(&buf[..size]) else {
                     continue;
                 };
+                IS_REMOTE_CONNECTION.store(is_remote_address(&sender), Ordering::Release);
 
                 // A CENTER press arrives as a burst of datagrams with one counter.
                 if let Some(counter) = hcam_trailer(&buf[..size]) {
@@ -323,15 +329,6 @@ fn receive_loop(socket: UdpSocket) {
                         data.roll
                     );
                 }
-
-                // Also update GLOBAL_STATE for legacy compatibility
-                // This is less frequent than reads, so RwLock overhead is acceptable
-                {
-                    let mut state = GLOBAL_STATE.write();
-                    state.yaw = data.yaw;
-                    state.pitch = data.pitch;
-                    state.roll = data.roll;
-                }
             }
             Ok((size, _)) => {
                 if !bad_size_logged {
@@ -356,6 +353,7 @@ fn receive_loop(socket: UdpSocket) {
                     last_logged_error_kind = Some(e.kind());
                     log::error!("UDP receive error: {}", e);
                 }
+                thread::sleep(Duration::from_millis(RECEIVE_ERROR_BACKOFF_MS));
             }
         }
     }

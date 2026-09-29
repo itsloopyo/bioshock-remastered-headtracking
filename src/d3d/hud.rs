@@ -1,6 +1,6 @@
 use std::ffi::c_void;
 use std::mem;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use once_cell::sync::OnceCell;
 
@@ -163,7 +163,14 @@ fn get_vtable_addrs() -> Result<VtableAddrs, &'static str> {
 
 unsafe extern "system" fn hooked_present(this: *mut c_void, sync_interval: u32, flags: u32) -> i32 {
     static CENTERING_FAILED: AtomicBool = AtomicBool::new(false);
-    if !CENTERING_FAILED.load(Ordering::Relaxed) {
+    // Each check is a handful of DXGI and window-manager queries. The placement waits
+    // are 500ms and 2s, so a tenth of a second between checks is fine enough.
+    static LAST_CENTER_CHECK_MS: AtomicU64 = AtomicU64::new(0);
+    let now = crate::engine_hook::now_ms();
+    if !CENTERING_FAILED.load(Ordering::Relaxed)
+        && now.saturating_sub(LAST_CENTER_CHECK_MS.load(Ordering::Relaxed)) >= 100
+    {
+        LAST_CENTER_CHECK_MS.store(now, Ordering::Relaxed);
         let sc = IDXGISwapChain::from_raw_borrowed(&this).unwrap();
         if let Err(error) = crate::window::center(sc) {
             CENTERING_FAILED.store(true, Ordering::Relaxed);

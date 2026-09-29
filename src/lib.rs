@@ -34,9 +34,10 @@ mod window;
 use std::ffi::c_void;
 
 use once_cell::sync::OnceCell;
-use windows::core::{s, w};
-use windows::Win32::Foundation::{BOOL, HINSTANCE, HMODULE, TRUE};
+use windows::core::{s, PCWSTR};
+use windows::Win32::Foundation::{BOOL, HINSTANCE, HMODULE, MAX_PATH, TRUE};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 
 use crate::tracking::GLOBAL_STATE;
@@ -132,11 +133,19 @@ pub struct XInputKeystroke {
 /// Error code for XInput: device not connected
 const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
 
-/// Load the real xinput1_3.dll from System32 and get all function pointers
+/// Load the real xinput1_3.dll from the system directory and get all function pointers.
+/// The directory is asked for, not written out, because Windows need not be on C:.
 fn load_real_xinput() -> Result<(), &'static str> {
     unsafe {
-        let path = w!("C:\\Windows\\System32\\xinput1_3.dll");
-        let handle = LoadLibraryW(path).map_err(|_| "Failed to load real xinput1_3.dll")?;
+        let mut directory = [0u16; MAX_PATH as usize];
+        let len = GetSystemDirectoryW(Some(&mut directory)) as usize;
+        if len == 0 || len >= directory.len() {
+            return Err("GetSystemDirectoryW failed");
+        }
+        let mut path = directory[..len].to_vec();
+        path.extend("\\xinput1_3.dll\0".encode_utf16());
+        let handle =
+            LoadLibraryW(PCWSTR(path.as_ptr())).map_err(|_| "Failed to load real xinput1_3.dll")?;
 
         REAL_XINPUT
             .set(SendSyncModule(handle))
@@ -270,7 +279,7 @@ fn shutdown_mod() {
 
 /// DLL entry point - called by Windows when the DLL is loaded/unloaded
 #[no_mangle]
-pub extern "system" fn DllMain(_hmodule: HINSTANCE, reason: u32, _reserved: *mut c_void) -> BOOL {
+pub extern "system" fn DllMain(_hmodule: HINSTANCE, reason: u32, reserved: *mut c_void) -> BOOL {
     match reason {
         DLL_PROCESS_ATTACH => {
             // Load real xinput1_3.dll SYNCHRONOUSLY - must be ready before any exports are called
@@ -282,7 +291,10 @@ pub extern "system" fn DllMain(_hmodule: HINSTANCE, reason: u32, _reserved: *mut
                 initialize_mod();
             });
         }
-        DLL_PROCESS_DETACH => {
+        // A non-null `reserved` means the process is exiting. Its other threads have
+        // already been terminated wherever they stood, possibly holding GLOBAL_STATE's
+        // lock, and taking that lock here would hang the game on exit.
+        DLL_PROCESS_DETACH if reserved.is_null() => {
             shutdown_mod();
         }
         _ => {}

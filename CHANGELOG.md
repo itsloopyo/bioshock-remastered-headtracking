@@ -30,6 +30,12 @@
 - New settings under `[Position]`: `CollisionEnabled` (whether a lean stops at walls, true by default) and `CollisionReleaseSmoothing` (how gently the view eases back out after a wall stopped a lean, 0.9 by default). Earlier versions always stopped a lean at walls, with that same release, and had no setting for either.
 - A log line when a Headcam tracker sends its CENTER signal, once per press. The tracker centres its own output; the mod still does nothing with the signal.
 
+### Fixed
+
+- The game no longer fails to start with the mod installed when Windows is on a drive other than C:.
+- A malformed packet from another device on the network no longer switches a tracker on this PC to `RemoteSmoothing`.
+- The game can no longer hang while closing if it closes just as a tracker packet arrives.
+
 ## [0.5.0] - 2026-09-17
 
 ### Added
