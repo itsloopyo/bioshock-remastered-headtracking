@@ -257,7 +257,11 @@ fn init_runtime_state(settings: &config::Settings) {
 
 fn install_engine_hook() {
     let result = memory::find_render_hooks().and_then(|hooks| {
-        engine_hook::install(hooks.camera_constructor, hooks.matrix_updater)?;
+        engine_hook::install(
+            hooks.camera_constructor,
+            hooks.matrix_updater,
+            hooks.point_region,
+        )?;
         compass::install(hooks.mesh_draw, hooks.lit_mesh_draw, hooks.compass_vtable)?;
         d3d::reticle::install(hooks.hud_draw)
     });

@@ -57,6 +57,23 @@ type CameraSceneNodeFn = unsafe extern "thiscall" fn(
     f32,
 ) -> *mut u8;
 type UpdateMatricesFn = unsafe extern "thiscall" fn(*mut u8);
+type PointRegionFn = unsafe extern "thiscall" fn(
+    *mut u8,
+    *mut PointRegion,
+    *mut u8,
+    f32,
+    f32,
+    f32,
+) -> *mut PointRegion;
+
+#[repr(C)]
+#[derive(Default)]
+struct PointRegion {
+    actor: u32,
+    leaf: i32,
+    zone: u8,
+    padding: [u8; 3],
+}
 type LineCheckFn = unsafe extern "thiscall" fn(
     *mut c_void,
     *mut Hit,
@@ -186,6 +203,7 @@ fn near_plane_standoff(projection: &Matrix) -> f32 {
 
 static ORIGINAL: OnceCell<CameraSceneNodeFn> = OnceCell::new();
 static UPDATE_MATRICES: OnceCell<UpdateMatricesFn> = OnceCell::new();
+static POINT_REGION: OnceCell<PointRegionFn> = OnceCell::new();
 #[derive(Clone, Copy)]
 pub enum ReticleState {
     Inactive,
@@ -606,6 +624,28 @@ unsafe extern "thiscall" fn camera_scene_node_detour(
         ]
     };
 
+    let native_zone = *scene.add(0x378).cast::<u32>();
+    // Zero also represents the native constructor's zone-culling bypass.
+    // Update the zone before the matrices, whose far plane depends on it.
+    if native_zone != 0 && offset != [0.0; 3] {
+        let model = *scene.add(0x368).cast::<*mut u8>();
+        let mut tracked_region = PointRegion::default();
+        POINT_REGION.get().unwrap()(
+            model,
+            &mut tracked_region,
+            level_info,
+            x + offset[0],
+            y + offset[1],
+            z + offset[2],
+        );
+        *scene.add(0x378).cast::<u32>() = u32::from(tracked_region.zone);
+    }
+    if log_frame {
+        log::info!(
+            "visibility: eye=({x},{y},{z}) native_zone={native_zone} tracked_zone={}",
+            *scene.add(0x378).cast::<u32>()
+        );
+    }
     std::ptr::write_unaligned(
         scene.add(0x310).cast(),
         FVector {
@@ -618,18 +658,19 @@ unsafe extern "thiscall" fn camera_scene_node_detour(
     UPDATE_MATRICES.get().unwrap()(scene);
 
     let tracked_view = read_matrix(scene, 0x150);
+    let tracked_projection = read_matrix(scene, 0x1d0);
     let corrected_weapon = projection::weapon_projection(
         clean_view,
         clean_inverse,
         tracked_view,
         read_matrix(scene, 0x190),
-        world_projection,
+        tracked_projection,
         inverse_projection,
         weapon_projection,
     );
     write_matrix(scene, 0x380, corrected_weapon);
     write_matrix(scene, 0x290, tracked_view.multiply(corrected_weapon));
-    let reticle = projection::project(aim, tracked_view.multiply(world_projection));
+    let reticle = projection::project(aim, tracked_view.multiply(tracked_projection));
     *RETICLE.lock() = reticle.map_or(ReticleState::Hidden, ReticleState::Position);
 
     if log_frame {
@@ -643,8 +684,15 @@ unsafe extern "thiscall" fn camera_scene_node_detour(
     scene
 }
 
-pub fn install(constructor: usize, update_matrices: usize) -> Result<(), String> {
+pub fn install(
+    constructor: usize,
+    update_matrices: usize,
+    point_region: usize,
+) -> Result<(), String> {
     unsafe {
+        POINT_REGION
+            .set(std::mem::transmute::<usize, PointRegionFn>(point_region))
+            .map_err(|_| "Point-region query already installed".to_string())?;
         UPDATE_MATRICES
             .set(std::mem::transmute::<usize, UpdateMatricesFn>(
                 update_matrices,

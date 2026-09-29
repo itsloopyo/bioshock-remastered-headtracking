@@ -5,6 +5,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleA;
 pub struct RenderHooks {
     pub camera_constructor: usize,
     pub matrix_updater: usize,
+    pub point_region: usize,
     pub hud_draw: usize,
     pub mesh_draw: usize,
     pub lit_mesh_draw: usize,
@@ -31,6 +32,7 @@ pub fn find_render_hooks() -> Result<RenderHooks, String> {
     Ok(RenderHooks {
         camera_constructor: base + 0x56dc30,
         matrix_updater: base + 0x56dd90,
+        point_region: base + 0x55b7c0,
         hud_draw: base + 0x765ac0,
         mesh_draw: base + 0x455110,
         lit_mesh_draw: base + 0x455180,

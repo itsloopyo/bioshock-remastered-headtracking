@@ -32,6 +32,7 @@
 
 ### Fixed
 
+- Rooms no longer disappear into a black void when a head-tracked lean crosses a visibility boundary.
 - The game no longer fails to start with the mod installed when Windows is on a drive other than C:.
 - A malformed packet from another device on the network no longer switches a tracker on this PC to `RemoteSmoothing`.
 - The game can no longer hang while closing if it closes just as a tracker packet arrives.
