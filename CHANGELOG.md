@@ -35,6 +35,7 @@
 - The game no longer fails to start with the mod installed when Windows is on a drive other than C:.
 - A malformed packet from another device on the network no longer switches a tracker on this PC to `RemoteSmoothing`.
 - The game can no longer hang while closing if it closes just as a tracker packet arrives.
+- A lean into a wall or object stops at the same distance from it in every direction, far enough that turning your head there cannot bring the edge of the screen into it. Earlier versions could let the edge of the view into a surface you leaned toward at a shallow angle, and held a straight lean further off a wall than it needed.
 
 ## [0.5.0] - 2026-09-17
 

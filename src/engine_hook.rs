@@ -80,16 +80,108 @@ struct Hit {
     rest: [u32; 5],
 }
 
+#[repr(C)]
+struct LeanHit {
+    queried: i32,
+    blocked: i32,
+    distance: f32,
+}
+
+type LeanQueryFn = unsafe extern "C" fn(*mut c_void, *const f32, *const f32, f32, *mut LeanHit);
+
 extern "C" {
     fn apply_lean_clamp(
         offset: *mut f32,
+        eye: *const f32,
         delta_time: f32,
-        skin: f32,
         release_smoothing: f32,
-        blocked: i32,
-        distance: f32,
-    );
+        query: LeanQueryFn,
+        context: *mut c_void,
+    ) -> i32;
     fn reset_lean_clamp();
+}
+
+const LEAN_CONTACT: i32 = 1;
+const LEAN_QUERY_FAILED: i32 = 2;
+
+/// Floor on the cosine between the lean and a surface's normal when the ray query
+/// converts a hit into how far the eye may go. A glancing surface would otherwise
+/// ask for an unbounded standoff along the ray.
+const MIN_APPROACH_COS: f32 = 0.25;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LeanShape {
+    Box,
+    /// The box started inside the standoff of something, where it reports a hit at
+    /// its start in every direction.
+    Ray,
+}
+
+struct LeanQuery {
+    actor: *mut u8,
+    standoff: f32,
+    shape: LeanShape,
+    hit_actor: u32,
+    hit_time: f32,
+}
+
+/// The eye has to stay `standoff` away from every surface. A box of that half-width
+/// swept from the clean eye stops with its centre that far off whatever it meets, edges
+/// and corners the ray would slip past included.
+unsafe extern "C" fn lean_query(
+    context: *mut c_void,
+    start: *const f32,
+    direction: *const f32,
+    max_distance: f32,
+    out: *mut LeanHit,
+) {
+    let query = &mut *context.cast::<LeanQuery>();
+    let start = std::slice::from_raw_parts(start, 3);
+    let direction = std::slice::from_raw_parts(direction, 3);
+    let point = |distance: f32| FVector {
+        x: start[0] + direction[0] * distance,
+        y: start[1] + direction[1] * distance,
+        z: start[2] + direction[2] * distance,
+    };
+    let eye = point(0.0);
+    let swept = trace(query.actor, eye, point(max_distance), query.standoff);
+    query.hit_actor = swept.actor;
+    query.hit_time = swept.time;
+    if swept.actor == 0 || swept.time > 0.0 {
+        query.shape = LeanShape::Box;
+        *out = LeanHit {
+            queried: 1,
+            blocked: i32::from(swept.actor != 0),
+            distance: swept.time * max_distance,
+        };
+        return;
+    }
+
+    // A ray still tells which way is open. It has to reach past the lean far enough
+    // to see a surface the eye would come to rest within the standoff of, measured
+    // along that surface's normal.
+    query.shape = LeanShape::Ray;
+    let reach = max_distance + query.standoff / MIN_APPROACH_COS;
+    let ray = trace(query.actor, eye, point(reach), 0.0);
+    query.hit_actor = ray.actor;
+    query.hit_time = ray.time;
+    let approach =
+        -(direction[0] * ray.normal.x + direction[1] * ray.normal.y + direction[2] * ray.normal.z);
+    *out = LeanHit {
+        queried: 1,
+        blocked: i32::from(ray.actor != 0),
+        distance: (ray.time * reach - query.standoff / approach.max(MIN_APPROACH_COS)).max(0.0),
+    };
+}
+
+/// How far the eye must stay from any surface for none of the near plane to reach
+/// it, whichever way the head turns: the distance from the eye to a corner of the
+/// near plane, plus one unit. Holding only the near clip distance lets a corner cross
+/// a wall the view meets at an angle.
+fn near_plane_standoff(projection: &Matrix) -> f32 {
+    let p = projection.0;
+    let near = (p[3][2] / p[2][2]).abs();
+    near * (1.0 + 1.0 / (p[0][0] * p[0][0]) + 1.0 / (p[1][1] * p[1][1])).sqrt() + 1.0
 }
 
 static ORIGINAL: OnceCell<CameraSceneNodeFn> = OnceCell::new();
@@ -116,6 +208,19 @@ static LAST_LOG_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_ACTOR: AtomicUsize = AtomicUsize::new(0);
 static LAST_PAUSED: AtomicBool = AtomicBool::new(false);
 static VIEW_CALLS: AtomicU64 = AtomicU64::new(0);
+static LAST_LEAN_CONTACT: AtomicBool = AtomicBool::new(false);
+static LAST_LEAN_SHAPE_RAY: AtomicBool = AtomicBool::new(false);
+
+/// Seconds since the previous lean clamp, for its release ease. The camera hook runs on
+/// the game thread only.
+fn lean_delta_time() -> f32 {
+    thread_local! {
+        static LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    }
+    let now = Instant::now();
+    LAST.with(|last| last.replace(Some(now)))
+        .map_or(0.0, |previous| (now - previous).as_secs_f32())
+}
 
 pub fn now_ms() -> u64 {
     static START: OnceCell<Instant> = OnceCell::new();
@@ -375,7 +480,7 @@ unsafe extern "thiscall" fn camera_scene_node_detour(
     );
     let now = now_ms();
     let frame = VIEW_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
-    let previous = LAST_VIEW_MS.swap(now, Ordering::Relaxed);
+    LAST_VIEW_MS.store(now, Ordering::Relaxed);
     let changed_actor = LAST_ACTOR.swap(actor as usize, Ordering::Relaxed) != actor as usize;
     let pawn = *actor.add(0x450).cast::<*mut u8>();
     // ALevelInfo::Pauser is shared by the pause interface and its submenus.
@@ -428,6 +533,7 @@ unsafe extern "thiscall" fn camera_scene_node_detour(
         apply_camera_local_yaw(&clean, pose.rotation.0, pose.rotation.1, pose.rotation.2)
     };
     let mut offset = [0.0_f32; 3];
+    let mut lean = None;
     if is_position_enabled_atomic() {
         let (right, up, forward) = pose.position;
         let angle = units_to_deg(yaw).to_radians();
@@ -436,33 +542,47 @@ unsafe extern "thiscall" fn camera_scene_node_detour(
             (forward * angle.sin() + right * angle.cos()) as f32,
             up as f32,
         ];
-        let desired = offset.iter().map(|value| value * value).sum::<f32>().sqrt();
-        let skin = (world_projection.0[3][2] / world_projection.0[2][2]).abs() + 1.0;
-        if desired > 0.0001 && crate::config::collision_enabled() {
-            let distance = desired + skin;
-            let hit = trace(
+        if crate::config::collision_enabled() {
+            let desired = offset.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let mut query = LeanQuery {
                 actor,
-                FVector { x, y, z },
-                FVector {
-                    x: x + offset[0] * distance / desired,
-                    y: y + offset[1] * distance / desired,
-                    z: z + offset[2] * distance / desired,
-                },
-                skin,
-            );
-            apply_lean_clamp(
+                standoff: near_plane_standoff(&world_projection),
+                shape: LeanShape::Box,
+                hit_actor: 0,
+                hit_time: 1.0,
+            };
+            let state = apply_lean_clamp(
                 offset.as_mut_ptr(),
-                now.saturating_sub(previous) as f32 / 1000.0,
-                skin,
+                [x, y, z].as_ptr(),
+                lean_delta_time(),
                 crate::config::collision_release_smoothing(),
-                i32::from(hit.actor != 0),
-                hit.time * distance,
+                lean_query,
+                (&mut query as *mut LeanQuery).cast(),
             );
+            lean = Some((desired, state, query));
         } else {
             reset_lean_clamp();
         }
     } else {
         reset_lean_clamp();
+    }
+    if let Some((desired, state, query)) = &lean {
+        let contact = state & LEAN_CONTACT != 0;
+        let failed = state & LEAN_QUERY_FAILED != 0;
+        let transition = LAST_LEAN_CONTACT.swap(contact, Ordering::Relaxed) != contact
+            || LAST_LEAN_SHAPE_RAY.swap(query.shape == LeanShape::Ray, Ordering::Relaxed)
+                != (query.shape == LeanShape::Ray)
+            || failed;
+        if transition || log_frame {
+            let allowed = offset.iter().map(|value| value * value).sum::<f32>().sqrt();
+            log::info!(
+                "lean: contact={contact} query_failed={failed} desired={desired:.2} allowed={allowed:.2} standoff={:.2} shape={:?} hit_actor={:#x} hit_time={}",
+                query.standoff,
+                query.shape,
+                query.hit_actor,
+                query.hit_time
+            );
+        }
     }
 
     let direction = clean_inverse.transform([0.0, 0.0, 1.0, 0.0]);
@@ -604,6 +724,27 @@ mod tests {
                 error
             );
         }
+    }
+
+    #[test]
+    fn standoff_reaches_the_near_plane_corners() {
+        // D3D left-handed perspective, near 4 and far 10000, with the cotangents of the
+        // half angles in [0][0] and [1][1].
+        let (near, far, cot_x, cot_y) = (4.0_f32, 10000.0_f32, 0.8391_f32, 1.4917_f32);
+        let projection = Matrix([
+            [cot_x, 0.0, 0.0, 0.0],
+            [0.0, cot_y, 0.0, 0.0],
+            [0.0, 0.0, far / (far - near), 1.0],
+            [0.0, 0.0, -near * far / (far - near), 0.0],
+        ]);
+        let corner =
+            (near * near + (near / cot_x) * (near / cot_x) + (near / cot_y) * (near / cot_y))
+                .sqrt();
+        let standoff = near_plane_standoff(&projection);
+        assert!(
+            (standoff - (corner + 1.0)).abs() < 1e-3,
+            "{standoff} vs {corner}"
+        );
     }
 
     #[test]

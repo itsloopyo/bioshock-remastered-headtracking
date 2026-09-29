@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Global tracking state management
 //!
 //! Provides thread-safe global state shared between UDP receiver,
@@ -74,24 +73,6 @@ impl AtomicRotation {
             f64::from_bits(self.roll.load(Ordering::Acquire)),
         )
     }
-
-    /// Get current yaw value
-    #[inline(always)]
-    pub fn yaw(&self) -> f64 {
-        f64::from_bits(self.yaw.load(Ordering::Acquire))
-    }
-
-    /// Get current pitch value
-    #[inline(always)]
-    pub fn pitch(&self) -> f64 {
-        f64::from_bits(self.pitch.load(Ordering::Acquire))
-    }
-
-    /// Get current roll value
-    #[inline(always)]
-    pub fn roll(&self) -> f64 {
-        f64::from_bits(self.roll.load(Ordering::Acquire))
-    }
 }
 
 impl std::fmt::Debug for AtomicRotation {
@@ -124,9 +105,6 @@ pub struct TrackingState {
     /// 6DOF positional tracking flag, cycled by CycleTrackingModeKey
     /// alongside `rotation_enabled`.
     pub position_enabled: bool,
-
-    /// True when in active gameplay, false during menus/cutscenes
-    pub gameplay_active: bool,
 
     /// Runtime yaw mode. True means horizon-locked world-space yaw.
     pub world_space_yaw: bool,
@@ -161,10 +139,6 @@ pub static ATOMIC_SAMPLE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::
 /// Atomic enabled flag for lock-free access
 pub static ATOMIC_ENABLED: AtomicBool = AtomicBool::new(true);
 
-/// Atomic gameplay_active flag for lock-free access
-/// Starts true so tracking works immediately (state detector also defaults to Gameplay)
-pub static ATOMIC_GAMEPLAY_ACTIVE: AtomicBool = AtomicBool::new(true);
-
 pub static ATOMIC_WORLD_SPACE_YAW: AtomicBool = AtomicBool::new(true);
 
 impl Default for TrackingState {
@@ -173,8 +147,6 @@ impl Default for TrackingState {
             enabled: true,
             rotation_enabled: true,
             position_enabled: true,
-            // Start active - state detector defaults to Gameplay
-            gameplay_active: true,
             world_space_yaw: true,
             shutdown_requested: false,
         }
@@ -294,18 +266,6 @@ pub fn is_enabled_atomic() -> bool {
     ATOMIC_ENABLED.load(Ordering::Acquire)
 }
 
-/// Check if gameplay is active using lock-free atomic
-#[inline(always)]
-pub fn is_gameplay_active_atomic() -> bool {
-    ATOMIC_GAMEPLAY_ACTIVE.load(Ordering::Acquire)
-}
-
-/// Set gameplay active state atomically
-#[inline(always)]
-pub fn set_gameplay_active_atomic(active: bool) {
-    ATOMIC_GAMEPLAY_ACTIVE.store(active, Ordering::Release);
-}
-
 /// Serialises the tests that drive the process-global tracking atomics and the
 /// smoothing pipeline. `cargo test` runs test functions on parallel threads and
 /// these statics are shared, so a test that stores a pose and then asserts on it
@@ -394,15 +354,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_gameplay_active() {
-        let state = TrackingState::default();
-        assert!(
-            state.gameplay_active,
-            "Default gameplay_active should be true for immediate tracking"
-        );
-    }
-
-    #[test]
     fn test_default_shutdown_not_requested() {
         let state = TrackingState::default();
         assert!(
@@ -466,16 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn test_atomic_rotation_individual_accessors() {
-        let rotation = AtomicRotation::new();
-        rotation.store(10.0, 20.0, 30.0);
-
-        assert!((rotation.yaw() - 10.0).abs() < f64::EPSILON);
-        assert!((rotation.pitch() - 20.0).abs() < f64::EPSILON);
-        assert!((rotation.roll() - 30.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
     fn test_atomic_rotation_negative_values() {
         let rotation = AtomicRotation::new();
         rotation.store(-45.0, -30.0, -15.0);
@@ -513,17 +454,6 @@ mod tests {
         // Toggle on
         ATOMIC_ENABLED.store(true, Ordering::Release);
         assert!(is_enabled_atomic());
-    }
-
-    #[test]
-    fn test_atomic_gameplay_active_flag() {
-        // Set active
-        set_gameplay_active_atomic(true);
-        assert!(is_gameplay_active_atomic());
-
-        // Set inactive
-        set_gameplay_active_atomic(false);
-        assert!(!is_gameplay_active_atomic());
     }
 
     #[test]
