@@ -27,6 +27,7 @@ pub mod legacy_config;
 mod memory;
 mod opentrack;
 mod projection;
+mod rtti;
 mod smoothing;
 mod tracking;
 mod window;
