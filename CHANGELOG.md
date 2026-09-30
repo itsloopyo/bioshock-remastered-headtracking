@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.0] - 2026-09-30
+
+### Added
+
+- discover and validate compass identity through RTTI
+
 ## [0.6.0] - 2026-09-30
 
 ### Changed
